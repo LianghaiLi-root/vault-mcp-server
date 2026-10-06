@@ -19,13 +19,37 @@ has an isolated namespace; access control is enforced server-side.
 
 ## Features
 
-**Web console** (glassmorphism UI, three tabs)
+**Role model (important)**
 
-| Tab | What you can do |
-|-----|-----------------|
-| **凭据管理** Credentials | Add / edit / delete typed credentials (SSH / web / API / DB / generic). The form renders the fields for the selected type automatically. |
-| **安全设置** Security | Enroll / reset TOTP 2FA, view & regenerate your MCP token, change your login password. |
-| **运维 / 用户** Ops | Server status; **user management** (add user, reset password, reset 2FA, re-issue MCP token, delete user) written straight back to `config.yaml`; **SSH quick-ops** command generator (keygen, copy-id, connect test, alias, agent, remote useradd/passwd/authorized_keys/harden); credential-store integrity check. |
+| Role | Permissions |
+|------|-------------|
+| `admin` | Super-user. May rename itself, add / rename / delete any user, reset anyone's password & 2FA, re-issue tokens, and sees the full user list plus the global hardening switches. |
+| `user` | Ordinary account. **Manages only itself.** It cannot see the user list, has no *Ops / Users* tab, and every `/api/admin/*` route returns **404** (not 403) so the endpoints' existence is never confirmed. |
+
+An account without a `role` key is treated as `user`. Always keep at least one
+`admin`; the last remaining admin cannot be deleted.
+
+**Web console** (glassmorphism UI, tabs shown per role)
+
+| Tab | Visible to | What you can do |
+|-----|-----------|-----------------|
+| **凭据管理** Credentials | everyone | Add / edit / delete typed credentials (SSH / web / API / DB / generic). The form renders the fields for the selected type automatically. |
+| **安全设置** Security | everyone | Enroll / reset TOTP 2FA, view & regenerate your MCP token, change your login password. |
+| **运维 / 用户** Ops | `admin` only | Server status; **user management** (add user, **rename user**, reset password, reset 2FA, re-issue MCP token, delete user) written straight back to `config.yaml`; **web hardening**; credential-store integrity check. |
+
+**Web hardening** (admin-only, persisted under the `security` key of `config.yaml`)
+
+- **Cloudflare Access pre-check** — when on, every browser request must carry a
+  Cloudflare Access JWT (`Cf-Access-Jwt-Assertion` header or `CF_Authorization`
+  cookie). Requests without it get **403** before the login page even renders.
+  Pair it with Cloudflare Zero Trust for a "before login" access layer.
+- **Force secure cookie** — adds the `Secure` flag to the session cookie.
+- **Custom edge header** — a shared secret injected by your own nginx / CDN
+  (e.g. `add_header X-Edge-Secret "xxx";`); a mismatch is 403.
+- **Login throttling** — N failures from one source locks it out for M seconds (429).
+
+> `/mcp` is exempt from the edge check: it authenticates with its own Bearer
+> token and is machine-facing rather than browser-facing.
 
 **MCP tools:** `vault_save`, `vault_get`, `vault_list`, `vault_delete`, and
 `vault_http` (AI-blind HTTP call — the secret is injected server-side and never
@@ -37,7 +61,7 @@ returned to the model).
 |------|---------|
 | `vault_mcp/vault_core.py` | Crypto + per-user encrypted storage (stdlib + `cryptography`) |
 | `vault_mcp/auth.py` | scrypt password hashing, TOTP (RFC 6238), HMAC session tokens |
-| `vault_mcp/config.py` | Loads/writes `config.yaml`, user CRUD, 2FA state persistence |
+| `vault_mcp/config.py` | Loads/writes `config.yaml`, user CRUD, **role checks**, web-hardening settings, 2FA state persistence |
 | `vault_mcp/server.py` | FastAPI app: web console + remote MCP (`/mcp`) |
 | `vault_mcp/stdio.py` | Local **stdio** MCP server (agent use on this machine) |
 | `vault_mcp/cli.py` | Operator CLI to provision users / tokens |
@@ -60,7 +84,9 @@ export VAULT_FORCE_PBKDF2=1
 export VAULT_DIR=/var/lib/vault-mcp/vault
 
 # 2. provision a user (writes config.yaml with a scrypt hash + mcp_token)
-python -m vault_mcp.cli add-user admin
+python -m vault_mcp.cli add-user admin --role admin
+#    later accounts default to the ordinary role:
+# python -m vault_mcp.cli add-user alice
 
 # 3. run (behind TLS / reverse proxy in production)
 VAULT_COOKIE_SECURE=1 uvicorn vault_mcp.server:app --host 0.0.0.0 --port 8080
@@ -74,7 +100,7 @@ Authenticator under **两步验证**.
 
 ```bash
 echo "VAULT_MASTER_PASSWORD=$(openssl rand -hex 32)" > .env
-python -m vault_mcp.cli add-user admin          # generates config.yaml + token
+python -m vault_mcp.cli add-user admin --role admin   # generates config.yaml + token
 docker compose up --build
 ```
 
@@ -160,7 +186,7 @@ cd /opt/vault-mcp-server && python -m venv .venv && .venv/bin/pip install -r req
 
 # 2. provision config + secrets
 cp config.example.yaml config.yaml
-.venv/bin/python -m vault_mcp.cli add-user admin
+.venv/bin/python -m vault_mcp.cli add-user admin --role admin
 cp deploy/env.example .env
 #   edit .env: set VAULT_MASTER_PASSWORD (openssl rand -hex 32) and chmod 600 .env
 
