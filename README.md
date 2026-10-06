@@ -60,6 +60,35 @@ An account without a `role` key is treated as `user`. Always keep at least one
 > as the only recovery. The UI asks for confirmation before enabling the gate
 > so you configure the Cloudflare Access application first.
 
+**Human verification** (login page; admin-only, persisted under `captcha` in
+`config.yaml`)
+
+Blocks automated credential-stuffing *before* the password comparison. Pick one:
+
+| Mode | What it is |
+|------|------------|
+| `off` | disabled |
+| `numeric` | digits only, rendered as an image |
+| `image` | letters + digits, rendered as an image with noise |
+| `turnstile` | **Cloudflare Turnstile** — automatic, usually just a checkbox |
+
+- Images are rendered to PNG with Pillow, deliberately **not** SVG — text inside
+  an SVG is plain markup a bot can read, which would defeat the purpose. If
+  Pillow is missing the mode degrades to an arithmetic question; it **never**
+  degrades to "no challenge". The admin card shows a warning in that state.
+- **Turnstile cannot be enabled without credentials**: both the site key and the
+  secret key are required, and a save missing either is rejected with a message
+  naming what is absent. The secret is **never echoed back** to the browser — the
+  UI only reports whether one is stored. Send a new value to replace it, or use
+  "clear secret" to wipe it.
+- Answers stay **server-side**: the browser only receives an opaque id. Answers
+  live in memory, expire after 5 minutes and are **single-use**, so a captured id
+  cannot be replayed. Failed challenges count toward the login throttle.
+- A wrong key produces a readable error on the login page (including the
+  Cloudflare error code) instead of a silent blank box.
+
+> Pillow is an optional dependency: `pip install Pillow`.
+
 **MCP tools:** `vault_save`, `vault_get`, `vault_list`, `vault_delete`, and
 `vault_http` (AI-blind HTTP call — the secret is injected server-side and never
 returned to the model).
@@ -70,7 +99,8 @@ returned to the model).
 |------|---------|
 | `vault_mcp/vault_core.py` | Crypto + per-user encrypted storage (stdlib + `cryptography`) |
 | `vault_mcp/auth.py` | scrypt password hashing, TOTP (RFC 6238), HMAC session tokens |
-| `vault_mcp/config.py` | Loads/writes `config.yaml`, user CRUD, **role checks**, web-hardening settings, 2FA state persistence |
+| `vault_mcp/config.py` | Loads/writes `config.yaml`, user CRUD, **role checks**, web-hardening + captcha settings, 2FA state persistence |
+| `vault_mcp/captcha.py` | Login human verification: image rendering, single-use answer store, Cloudflare Turnstile verification |
 | `vault_mcp/server.py` | FastAPI app: web console + remote MCP (`/mcp`) |
 | `vault_mcp/stdio.py` | Local **stdio** MCP server (agent use on this machine) |
 | `vault_mcp/cli.py` | Operator CLI to provision users / tokens |
