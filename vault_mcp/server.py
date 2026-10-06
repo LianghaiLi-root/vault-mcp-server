@@ -697,12 +697,18 @@ const au=$('adduser'); if(au) au.onclick=async()=>{
 };
 
 // ---- web hardening (admin only) ----
+let wasCfOn = {{ 'true' if sec.require_cloudflare_access else 'false' }};
 document.querySelectorAll('.toggle').forEach(t=>t.onclick=()=>{
   t.classList.toggle('on');
 });
 const ss=$('secsave'); if(ss) ss.onclick=async()=>{
+  const turningOn=$('tg_cf').classList.contains('on');
+  if(turningOn && !wasCfOn){
+    const ok=confirm('即将启用边缘访问校验。\n\n启用后，只有携带 Cloudflare Access 凭证的浏览器才能打开登录页；\n请在 Cloudflare 侧确认 Access 应用已覆盖本站，否则所有人都将无法登录。\n\n仍要以 MCP Bearer Token 调用 API 的方式随时关闭本开关。\n\n确定启用？');
+    if(!ok) return;
+  }
   const body={
-    require_cloudflare_access: $('tg_cf').classList.contains('on'),
+    require_cloudflare_access: turningOn,
     force_secure_cookie: $('tg_secure_cookie').classList.contains('on'),
     required_edge_header: $('edge_hdr').value.trim(),
     required_edge_header_value: $('edge_val').value.trim(),
@@ -711,6 +717,7 @@ const ss=$('secsave'); if(ss) ss.onclick=async()=>{
   };
   const d=await j('/api/admin/security','POST',body);
   say('secmsg', d.ok, d.ok?'✓ 加固设置已保存':('失败：'+d.error));
+  if(d.ok) wasCfOn=turningOn;
 };
 const sr=$('secrefresh'); if(sr) sr.onclick=()=>location.reload();
 
@@ -905,6 +912,14 @@ def _edge_gate(cfg: dict, request: Request) -> Response | None:
     # machines, not browsers, so the browser-oriented edge gate does not apply.
     if request.url.path.startswith("/mcp"):
         return None
+    # A VALID bearer token is a machine credential that a casual browser visitor
+    # cannot forge. Exempting it is also what keeps this feature safe: the gate
+    # is configured through POST /api/admin/security, so if the gate also blocked
+    # bearer calls, an admin who enabled it could never turn it back off again.
+    auth_hdr = request.headers.get("Authorization", "")
+    if auth_hdr.startswith("Bearer "):
+        if config.find_user_by_token(cfg, auth_hdr[7:].strip()):
+            return None
     if sec.get("require_cloudflare_access"):
         has_header = bool(request.headers.get("Cf-Access-Jwt-Assertion"))
         has_cookie = bool(request.cookies.get("CF_Authorization"))
