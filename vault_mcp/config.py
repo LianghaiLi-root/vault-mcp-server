@@ -159,6 +159,65 @@ def security_settings(cfg: dict) -> dict:
     return s
 
 
+# --------------------------------------------------------------------------
+# Human verification on the login form (admin-managed, config.yaml `captcha`)
+# --------------------------------------------------------------------------
+DEFAULT_CAPTCHA = {
+    # off | numeric | image | turnstile
+    "mode": "off",
+    # number of glyphs for the image-based modes (3-8)
+    "length": 4,
+    # Cloudflare Turnstile credentials. Both are REQUIRED before mode may be
+    # switched to "turnstile" — enforced by validate_captcha() below.
+    "turnstile_site_key": "",
+    "turnstile_secret_key": "",
+}
+
+CAPTCHA_MODES = ("off", "numeric", "image", "turnstile")
+
+
+def captcha_settings(cfg: dict) -> dict:
+    c = dict(DEFAULT_CAPTCHA)
+    c.update(cfg.get("captcha", {}) or {})
+    return c
+
+
+def validate_captcha(payload: dict, current: dict) -> tuple[dict | None, str]:
+    """Validate an admin-supplied captcha config.
+
+    Returns (settings, "") on success or (None, error_message) on rejection.
+    An empty `turnstile_secret_key` means "keep the stored one" so the secret
+    never has to be re-sent from the browser; pass clear_secret=true to wipe it.
+    """
+    mode = str(payload.get("mode") or "off").strip().lower()
+    if mode not in CAPTCHA_MODES:
+        return None, f"未知的验证方式: {mode}"
+
+    try:
+        length = int(payload.get("length") or 4)
+    except (TypeError, ValueError):
+        return None, "验证码长度必须是数字"
+    if not 3 <= length <= 8:
+        return None, "验证码长度需在 3–8 之间"
+
+    site = str(payload.get("turnstile_site_key") or "").strip()
+    secret = str(payload.get("turnstile_secret_key") or "").strip()
+    if payload.get("clear_secret"):
+        secret = ""
+    elif not secret:
+        secret = str(current.get("turnstile_secret_key") or "")
+
+    # The whole point of the feature: an automatic (Cloudflare) challenge cannot
+    # work without credentials, so refuse to enable it half-configured.
+    if mode == "turnstile":
+        missing = [n for n, v in (("Site Key", site), ("Secret Key", secret)) if not v]
+        if missing:
+            return None, "启用 Cloudflare Turnstile 前必须填写 " + " 与 ".join(missing)
+
+    return {"mode": mode, "length": length,
+            "turnstile_site_key": site, "turnstile_secret_key": secret}, ""
+
+
 def set_password_hash(cfg: dict, username: str, password_hash: str) -> bool:
     for u in get_users(cfg):
         if u.get("username") == username:
