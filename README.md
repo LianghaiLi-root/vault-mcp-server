@@ -48,8 +48,17 @@ An account without a `role` key is treated as `user`. Always keep at least one
   (e.g. `add_header X-Edge-Secret "xxx";`); a mismatch is 403.
 - **Login throttling** — N failures from one source locks it out for M seconds (429).
 
-> `/mcp` is exempt from the edge check: it authenticates with its own Bearer
-> token and is machine-facing rather than browser-facing.
+> **Edge-check exemptions:** `/mcp` and **any request carrying a valid Bearer
+> token** skip the edge check. The former is machine-facing and authenticates on
+> its own; the latter is a machine credential a casual visitor cannot forge.
+>
+> This exemption is what keeps the feature safe to use: the hardening switches
+> are themselves configured through `POST /api/admin/security` (which accepts a
+> Bearer token). If the gate also blocked that call, enabling Cloudflare Access
+> would lock the admin out of every authenticated path — including the one
+> needed to switch it back off — leaving hand-editing `config.yaml` on the host
+> as the only recovery. The UI asks for confirmation before enabling the gate
+> so you configure the Cloudflare Access application first.
 
 **MCP tools:** `vault_save`, `vault_get`, `vault_list`, `vault_delete`, and
 `vault_http` (AI-blind HTTP call — the secret is injected server-side and never
@@ -69,6 +78,24 @@ returned to the model).
 | `pyproject.toml` | Package metadata, dependencies, console entry points |
 | `deploy/` | systemd unit, nginx TLS proxy, `.env` template |
 | `config.example.yaml` | Operator config template (users + server + vault dir) |
+
+> ⚠️ **Read this before editing the web templates**
+>
+> `DASH_TPL_SRC` / `LOGIN_TPL_SRC` in `vault_mcp/server.py` are **non-raw**
+> triple-quoted Python strings with JavaScript inside. A `\n` written in them is
+> compiled by Python into a **real newline**, which splits the JS string literal
+> and makes the whole `<script>` block fail with
+> `SyntaxError: Invalid or unexpected token` — every event handler on the page
+> dies silently (dead tabs, an apparently-empty type dropdown). **The sequence
+> bites in comments too.**
+>
+> Write `\\n`, or use `['a','b'].join(NL)` with `const NL='\\n';`.
+>
+> To stop this regressing, the server runs a self-check **at import time**: it
+> reads the `.py` source and scans inside `<script>…</script>` for the raw
+> sequence, raising with an exact line number on a hit. Note this bug **cannot**
+> be detected by inspecting a runtime string — after compilation the backslash
+> is already gone — so the guard must look at the raw source.
 
 ## Quick start (Linux server)
 
