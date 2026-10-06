@@ -38,6 +38,18 @@ security:
   login_max_failures: 8
   login_lockout_seconds: 300
 
+# Human verification on the login form. Normally you set this from the admin UI
+# (运维/用户 → 人机验证) rather than by hand.
+captcha:
+  # off       no challenge
+  # numeric   digits only, rendered as an image
+  # image     letters + digits, rendered as an image with noise
+  # turnstile Cloudflare Turnstile — REQUIRES both keys below
+  mode: "off"
+  length: 4                      # glyph count for numeric / image (3-8)
+  turnstile_site_key: ""         # Cloudflare dashboard → Turnstile → site key
+  turnstile_secret_key: ""       # must be set together with the site key
+
 users:
   # `role` is either `admin` (super-user: manages all accounts) or `user`
   # (ordinary account: sees and edits only itself). An account with no `role`
