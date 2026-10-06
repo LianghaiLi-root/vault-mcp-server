@@ -27,10 +27,31 @@ mcp:
 #   allow_hosts:
 #     - api.github.com
 
+# Optional: web hardening (admin-managed from the console, but may be seeded here).
+# `require_cloudflare_access` makes EVERY browser request carry a Cloudflare
+# Access JWT (header or CF_Authorization cookie); without it the site 403s.
+security:
+  require_cloudflare_access: false
+  force_secure_cookie: false
+  required_edge_header: ""          # e.g. X-Edge-Secret injected by your proxy
+  required_edge_header_value: ""
+  login_max_failures: 8
+  login_lockout_seconds: 300
+
 users:
+  # `role` is either `admin` (super-user: manages all accounts) or `user`
+  # (ordinary account: sees and edits only itself). An account with no `role`
+  # is treated as `user`. Keep exactly one admin — the first one you create.
   - username: admin
-    # Generate with: python -m vault_mcp.cli add-user admin
+    role: admin
+    # Generate with: python -m vault_mcp.cli add-user admin --role admin
     password_hash: "REPLACE_WITH_scrypt_hash"
     # Generate with: python -m vault_mcp.cli set-token admin
     mcp_token: "REPLACE_WITH_long_random_token"
     totp_secret: null            # set automatically after 2FA enrollment
+
+  # - username: alice
+  #   role: user
+  #   password_hash: "REPLACE_WITH_scrypt_hash"
+  #   mcp_token: "REPLACE_WITH_long_random_token"
+  #   totp_secret: null
