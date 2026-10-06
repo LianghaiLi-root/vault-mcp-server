@@ -20,6 +20,13 @@ dependencies = [
     "sse-starlette",
 ]
 
+# Optional: renders the image CAPTCHA for the login page.
+#   pip install ".[captcha]"
+# Without it the numeric/image CAPTCHA modes degrade to an arithmetic question
+# instead of failing open. Turnstile needs no extra package.
+[project.optional-dependencies]
+captcha = ["Pillow>=10"]
+
 # Console entry points (available after `pip install .`):
 #   vault-mcp-server  -> starts the web + remote MCP server
 #   vault-mcp-cli     -> operator CLI (add-user / set-token / list-users)
