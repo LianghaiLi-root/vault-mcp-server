@@ -66,6 +66,26 @@ docker compose up --build
 
 Mount your own `config.yaml` and a volume for `/data` (the vault store).
 
+## Credential types
+
+Every credential carries a **type** that drives its input fields in the web
+console (and tells an AI client which field is the *primary* secret returned by
+`vault_get` / `vault_http`):
+
+| Type | Fields |
+|------|--------|
+| `generic` | 秘密 / 密码 |
+| `ssh` | 主机/IP · 端口 · 用户名 · 密码 · 私钥 |
+| `web` | 网址 URL · 用户名/邮箱 · 密码 |
+| `api` | Token / API Key · 接口地址 URL |
+| `db` | 主机 · 端口 · 数据库名 · 用户名 · 密码 |
+
+The list view shows a type badge, and each entry has **修改** (edit) and
+**删除** (delete) actions. Editing prefills every field; renaming an entry
+replaces the old record with the new name. All fields are encrypted at rest in a
+single AES-256-GCM blob — only `name`, `type` and `note` live in plaintext
+metadata, so the list (and `vault_list`) never expose values.
+
 ## Remote MCP client
 
 Point your MCP client at `http://<host>:8080/mcp` and authenticate with the

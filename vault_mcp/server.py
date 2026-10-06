@@ -42,6 +42,57 @@ cfg = config.load_config()
 
 
 # --------------------------------------------------------------------------
+# Credential type catalog — drives both the web form and the /api/types schema.
+# Each field: key, label, kind (text|password|textarea), secret (bool), default.
+# Add new common types here; the UI renders them automatically.
+# --------------------------------------------------------------------------
+CRED_TYPES = {
+    "generic": {
+        "label": "通用 / 密码",
+        "fields": [
+            {"key": "value", "label": "秘密 / 密码", "kind": "textarea", "secret": True},
+        ],
+    },
+    "ssh": {
+        "label": "SSH 服务器",
+        "fields": [
+            {"key": "host", "label": "主机 / IP", "kind": "text", "secret": False},
+            {"key": "port", "label": "端口", "kind": "text", "secret": False, "default": "22"},
+            {"key": "username", "label": "用户名", "kind": "text", "secret": False},
+            {"key": "password", "label": "密码", "kind": "password", "secret": True},
+            {"key": "private_key", "label": "私钥", "kind": "textarea", "secret": True},
+        ],
+    },
+    "web": {
+        "label": "网站 / 账号",
+        "fields": [
+            {"key": "url", "label": "网址 URL", "kind": "text", "secret": False},
+            {"key": "username", "label": "用户名 / 邮箱", "kind": "text", "secret": False},
+            {"key": "password", "label": "密码", "kind": "password", "secret": True},
+        ],
+    },
+    "api": {
+        "label": "API / Token",
+        "fields": [
+            {"key": "token", "label": "Token / API Key", "kind": "textarea", "secret": True},
+            {"key": "url", "label": "接口地址 URL", "kind": "text", "secret": False},
+        ],
+    },
+    "db": {
+        "label": "数据库",
+        "fields": [
+            {"key": "host", "label": "主机", "kind": "text", "secret": False},
+            {"key": "port", "label": "端口", "kind": "text", "secret": False},
+            {"key": "database", "label": "数据库名", "kind": "text", "secret": False},
+            {"key": "username", "label": "用户名", "kind": "text", "secret": False},
+            {"key": "password", "label": "密码", "kind": "password", "secret": True},
+        ],
+    },
+}
+TYPE_LABELS = {k: v["label"] for k, v in CRED_TYPES.items()}
+
+
+# --------------------------------------------------------------------------
 # Templates (inline, autoescaped)
 # --------------------------------------------------------------------------
 LOGIN_TPL = Template("""
@@ -78,44 +129,55 @@ DASH_TPL = Template("""
  h1{font-size:20px;margin:0 0 4px} .sub{color:#8b95a1;font-size:13px;margin-bottom:18px}
  .card{background:#1d2127;border:1px solid #2a2f37;border-radius:10px;padding:16px;margin-bottom:18px}
  label{display:block;font-size:13px;color:#aab2bd;margin:10px 0 4px}
- input[type=text],textarea{width:100%;box-sizing:border-box;background:#0f1216;border:1px solid #2a2f37;color:#e6e6e6;border-radius:6px;padding:9px;font-size:14px}
+ input[type=text],input[type=password],textarea,select{width:100%;box-sizing:border-box;background:#0f1216;border:1px solid #2a2f37;color:#e6e6e6;border-radius:6px;padding:9px;font-size:14px}
  textarea{resize:vertical;min-height:60px}
  button{background:#3b82f6;color:#fff;border:0;border-radius:6px;padding:9px 16px;font-size:14px;cursor:pointer}
  button:hover{background:#2f6fd6}
  button.del{background:#3a2226;color:#ff8a8a;padding:5px 10px;font-size:12px}
  button.del:hover{background:#4d2a2f}
+ button.edit{background:#23303f;color:#9fd0ff;padding:5px 10px;font-size:12px;margin-right:6px}
+ button.edit:hover{background:#2c3e52}
  button.sec{background:#23303f;color:#9fd0ff}
  table{width:100%;border-collapse:collapse;font-size:14px}
  th,td{text-align:left;padding:9px 8px;border-bottom:1px solid #262b32}
  th{color:#8b95a1;font-weight:600;font-size:12px} code{color:#7fd1ff}
  .muted{color:#6b7480} .ok{color:#9fe6a0} .msg{color:#9fe6a0;font-size:13px;min-height:16px}
  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+ .badge{display:inline-block;background:#23303f;color:#9fd0ff;border-radius:999px;padding:2px 10px;font-size:12px}
  pre{background:#0f1216;padding:10px;border-radius:6px;overflow:auto;font-size:12px;color:#9fe6a0}
+ #editbanner{display:none;background:#23303f;color:#9fd0ff;border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:13px}
 </style></head><body>
  <h1>🔐 凭据库</h1>
  <div class="sub">用户：<code>{{ user }}</code> · 存储模式：<code>{{ mode }}</code> · <a href="/logout" style="color:#8b95a1">退出</a></div>
 
  <div class="card">
+  <div id="editbanner"></div>
   <form id="add">
-   <input type="hidden" name="action" value="add">
-   <label>标识名（唯一，如 github_pat）</label>
-   <input type="text" name="name" required placeholder="github_pat" autocomplete="off">
-   <label>密码 / 凭据值</label>
-   <textarea name="value" required placeholder="粘贴 secret"></textarea>
+   <input type="hidden" id="original_name" value="">
+   <label>标识名（唯一，如 github_pat / myserver）</label>
+   <input type="text" id="f_name" required placeholder="github_pat" autocomplete="off">
+   <label>类型</label>
+   <select id="type"></select>
+   <div id="dynfields"></div>
    <label>备注（明文，可选）</label>
-   <input type="text" name="note" placeholder="例如：GitHub PAT" autocomplete="off">
-   <div style="margin-top:12px"><button type="submit">加密保存</button></div>
+   <input type="text" id="f_note" placeholder="例如：GitHub PAT" autocomplete="off">
+   <div style="margin-top:12px" class="row">
+     <button type="submit" id="submitbtn">加密保存</button>
+     <button type="button" id="cancelbtn" style="background:#3a2226;color:#ff8a8a">取消修改</button>
+   </div>
   </form>
   <div class="msg" id="addmsg"></div>
  </div>
 
  <div class="card">
-  <table><thead><tr><th>标识名</th><th>备注</th><th>更新时间</th><th></th></tr></thead>
+  <table><thead><tr><th>标识名</th><th>类型</th><th>备注</th><th>更新时间</th><th>操作</th></tr></thead>
   <tbody id="rows">
    {% for it in items %}<tr>
-     <td><code>{{ it.name }}</code></td><td>{{ it.note }}</td>
+     <td><code>{{ it.name }}</code></td>
+     <td><span class="badge">{{ type_labels.get(it.type, it.type) }}</span></td>
+     <td>{{ it.note }}</td>
      <td>{{ it.updated[:19].replace('T',' ') }}</td>
-     <td><button class="del" data-name="{{ it.name }}">删除</button></td>
+     <td><button class="edit" data-name="{{ it.name }}">修改</button><button class="del" data-name="{{ it.name }}">删除</button></td>
    </tr>{% endfor %}
   </tbody></table>
  </div>
@@ -140,29 +202,85 @@ DASH_TPL = Template("""
  </div>
 
 <script>
-async function j(url, body){
-  const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-  return r.json();
-}
-document.getElementById('add').onsubmit = async (e)=>{
-  e.preventDefault(); const f = new FormData(e.target);
-  const r = await j('/api/credentials', {name:f.get('name'), value:f.get('value'), note:f.get('note')});
-  document.getElementById('addmsg').textContent = r.ok ? '已保存 '+r.name : '错误：'+r.error;
-  if(r.ok) location.reload();
-};
-document.querySelectorAll('button.del').forEach(b=> b.onclick = async ()=>{
-  const r = await j('/api/credentials/'+encodeURIComponent(b.dataset.name), {});
-  if(r.ok) location.reload(); else alert(r.error);
-});
-const enroll = document.getElementById('enroll2fa');
-if(enroll) enroll.onclick = async ()=>{ const r = await j('/api/totp/enroll', {}); if(r.ok){ location.reload(); } };
-const confirm = document.getElementById('confirm2fa');
-if(confirm) confirm.onclick = async ()=>{
-  const code = document.getElementById('totpcode').value;
-  const r = await j('/api/totp/confirm', {code});
-  document.getElementById('totpmsg').textContent = r.ok ? '已启用 2FA' : '验证失败：'+r.error;
-  if(r.ok) location.reload();
-};
+(async ()=>{
+ async function j(url, method, body){
+   const opt={method:method, headers:{'Content-Type':'application/json'}};
+   if(body!==undefined) opt.body=JSON.stringify(body);
+   const r=await fetch(url, opt); return r.json();
+ }
+ const TYPES = await (await fetch('/api/types')).json();
+ function typeFields(t){ return (TYPES[t] && TYPES[t].fields) || []; }
+ function renderTypeSelect(){
+   const sel=document.getElementById('type'); sel.innerHTML='';
+   for(const [k,v] of Object.entries(TYPES)){
+     const o=document.createElement('option'); o.value=k; o.textContent=v.label; sel.appendChild(o);
+   }
+ }
+ function renderFields(type, values){
+   values=values||{}; const box=document.getElementById('dynfields'); box.innerHTML='';
+   typeFields(type).forEach(f=>{
+     const lab=document.createElement('label'); lab.textContent=f.label;
+     const inp=document.createElement(f.kind==='textarea'?'textarea':'input');
+     if(f.kind!=='textarea') inp.type = f.secret?'password':'text';
+     inp.name=f.key;
+     let val=values[f.key]; if(val==null && f.default!=null) val=f.default;
+     if(val!=null) inp.value=val;
+     lab.appendChild(inp); box.appendChild(lab);
+   });
+ }
+ function collectFields(){
+   const type=document.getElementById('type').value; const out={};
+   typeFields(type).forEach(f=>{ const el=document.querySelector('#dynfields [name="'+f.key+'"]'); if(el) out[f.key]=el.value; });
+   return out;
+ }
+ function resetForm(){
+   document.getElementById('original_name').value='';
+   document.getElementById('f_name').value='';
+   document.getElementById('f_note').value='';
+   document.getElementById('type').value='generic';
+   renderFields('generic',{});
+   document.getElementById('submitbtn').textContent='加密保存';
+   document.getElementById('editbanner').style.display='none';
+ }
+ renderTypeSelect(); renderFields('generic',{});
+ document.getElementById('cancelbtn').onclick=resetForm;
+ document.getElementById('type').onchange=()=>renderFields(document.getElementById('type').value, collectFields());
+ document.getElementById('add').onsubmit=async(e)=>{
+   e.preventDefault();
+   const orig=document.getElementById('original_name').value;
+   const body={name:document.getElementById('f_name').value, type:document.getElementById('type').value,
+               fields:collectFields(), note:document.getElementById('f_note').value};
+   if(orig) body.original_name=orig;
+   const d=await j('/api/credentials','POST',body);
+   document.getElementById('addmsg').textContent = d.ok ? ('已保存 '+d.name) : ('错误：'+d.error);
+   if(d.ok){ resetForm(); location.reload(); }
+ };
+ document.querySelectorAll('button.del').forEach(b=>b.onclick=async()=>{
+   if(!confirm('确认删除 '+b.dataset.name+' ?')) return;
+   const d=await j('/api/credentials/'+encodeURIComponent(b.dataset.name),'DELETE');
+   if(d.ok) location.reload(); else alert(d.error);
+ });
+ document.querySelectorAll('button.edit').forEach(b=>b.onclick=async()=>{
+   const d=await j('/api/credentials/'+encodeURIComponent(b.dataset.name),'GET');
+   if(!d.ok){ alert(d.error); return; }
+   document.getElementById('original_name').value=d.name;
+   document.getElementById('f_name').value=d.name;
+   document.getElementById('f_note').value=d.note||'';
+   document.getElementById('type').value=d.type;
+   renderFields(d.type, d.fields||{});
+   document.getElementById('submitbtn').textContent='保存修改';
+   const banner=document.getElementById('editbanner'); banner.style.display='block'; banner.textContent='正在修改：'+d.name;
+   window.scrollTo({top:0,behavior:'smooth'});
+ });
+ const enroll=document.getElementById('enroll2fa');
+ if(enroll) enroll.onclick=async()=>{ const d=await j('/api/totp/enroll','POST',{}); if(d.ok) location.reload(); };
+ const confirm=document.getElementById('confirm2fa');
+ if(confirm) confirm.onclick=async()=>{
+   const d=await j('/api/totp/confirm','POST',{code:document.getElementById('totpcode').value});
+   document.getElementById('totpmsg').textContent = d.ok ? '已启用 2FA' : ('验证失败：'+d.error);
+   if(d.ok) location.reload();
+ };
+})();
 </script>
 </body></html>""", autoescape=True)
 
@@ -178,14 +296,21 @@ def _ns() -> str | None:
 
 
 @mcp.tool()
-def vault_save(name: str, value: str, note: str = "") -> str:
-    """Save or update a credential in the caller's encrypted vault namespace."""
+def vault_save(name: str, value: str, note: str = "", type: str = "generic",
+              fields: dict = None) -> str:
+    """Save or update a credential in the caller's encrypted vault namespace.
+
+    `value` is the primary secret for a generic credential. For typed credentials
+    (ssh/web/api/db) pass `type` and a `fields` dict instead; `value` then
+    becomes the primary secret within `fields` automatically.
+    """
     ns = _ns()
     if not ns:
         return "ERROR: unauthorized"
     try:
-        r = vault_core.save_credential(ns, name, value, note)
-        return f"Saved credential '{r['name']}'."
+        f = dict(fields) if fields else {"value": value}
+        r = vault_core.save_credential(ns, name, type, f, note)
+        return f"Saved credential '{r['name']}' (type={r['type']})."
     except Exception as e:
         return f"ERROR: {e}"
 
@@ -367,9 +492,15 @@ def dashboard(request: Request):
     except Exception as e:
         items = [{"name": f"(list error: {e})", "note": "", "updated": ""}]
     totp_uri = auth.totp_uri(secret, user) if secret else ""
-    return DASH_TPL.render(user=user, items=items, mode=mode,
+    return DASH_TPL.render(user=user, items=items, mode=mode, type_labels=TYPE_LABELS,
                            totp_secret=secret or "", totp_confirmed=bool(state.get("totp_confirmed")),
                            totp_uri=totp_uri)
+
+
+@app.get("/api/types")
+def api_types(request: Request):
+    require_user(request)
+    return JSONResponse(CRED_TYPES)
 
 
 @app.get("/api/credentials")
@@ -378,12 +509,31 @@ def api_list(request: Request):
     return JSONResponse(vault_core.list_credentials(user))
 
 
+@app.get("/api/credentials/{name}")
+def api_get(request: Request, name: str):
+    user = require_user(request)
+    try:
+        return JSONResponse(vault_core.load_record(user, name))
+    except KeyError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=404)
+
+
 @app.post("/api/credentials")
 async def api_add(request: Request):
     user = require_user(request)
     data = await request.json()
+    name = data.get("name")
+    if not name:
+        return JSONResponse({"ok": False, "error": "name is required"}, status_code=400)
+    type_ = data.get("type", "generic")
+    fields = data.get("fields") or {}
+    note = data.get("note", "")
+    original = data.get("original_name")
     try:
-        r = vault_core.save_credential(user, data["name"], data["value"], data.get("note", ""))
+        # Support rename: delete the old record first if the key changed.
+        if original and original != name:
+            vault_core.delete_credential(user, original)
+        r = vault_core.save_credential(user, name, type_, fields, note)
         return JSONResponse({"ok": True, **r})
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)

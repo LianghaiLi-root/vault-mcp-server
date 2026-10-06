@@ -59,6 +59,20 @@ docker compose up --build
 
 挂载你自己的 `config.yaml`，并为 `/data`（保险库存储）挂载卷。
 
+## 凭据类型
+
+每条凭据都带有一个**类型**，它会决定 Web 控制台里显示的输入框（也决定 AI 客户端通过 `vault_get` / `vault_http` 拿到的*主*秘密字段）：
+
+| 类型 | 字段 |
+|------|------|
+| `generic` | 秘密 / 密码 |
+| `ssh` | 主机/IP · 端口 · 用户名 · 密码 · 私钥 |
+| `web` | 网址 URL · 用户名/邮箱 · 密码 |
+| `api` | Token / API Key · 接口地址 URL |
+| `db` | 主机 · 端口 · 数据库名 · 用户名 · 密码 |
+
+列表页会显示类型徽标，每条记录都有 **修改** 与 **删除** 按钮。修改会预填所有字段；重命名条目会用新名称替换旧记录。所有字段都以单个 AES-256-GCM 密文加密落盘——只有 `name`、`type`、`note` 以明文元数据存在，因此列表与 `vault_list` 永远不会泄露秘密值。
+
 ## 远程 MCP 客户端
 
 将你的 MCP 客户端指向 `http://<host>:8080/mcp`，并使用用户的 `mcp_token` 作为 **Bearer** 令牌进行认证。四个工具——`vault_save`、`vault_get`、`vault_list`、`vault_delete`——只在该用户的命名空间内操作。此外还有一个 **对 AI 不可见（AI-blind）** 的工具：

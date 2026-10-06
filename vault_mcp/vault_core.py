@@ -185,36 +185,106 @@ def _ts() -> str:
 # --------------------------------------------------------------------------
 # CRUD
 # --------------------------------------------------------------------------
-def save_credential(namespace: str | None, name: str, value: str, note: str = "") -> dict:
+# Primary secret field per type — returned by get_credential() for AI tools
+# (vault_get / vault_http use this so the "main" secret is what the model sees).
+PRIMARY_FIELD = {
+    "generic": "value",
+    "ssh": "password",
+    "web": "password",
+    "api": "token",
+    "db": "password",
+}
+
+
+def _encrypt_fields(dek: bytes, fields: dict) -> str:
+    pt = json.dumps(fields, ensure_ascii=False).encode("utf-8")
+    return _b64e(_aes_gcm_encrypt(dek, pt))
+
+
+def _decrypt_fields(dek: bytes, blob_b64: str) -> dict:
+    pt = _aes_gcm_decrypt(dek, _b64d(blob_b64))
+    try:
+        obj = json.loads(pt.decode("utf-8"))
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
+    # Legacy record: a raw string was stored as the secret -> generic shape.
+    return {"value": pt.decode("utf-8")}
+
+
+def save_credential(namespace: str | None, name: str, type_: str,
+                   fields: dict, note: str = "") -> dict:
+    """Persist a credential of a given `type_` with a dict of `fields`.
+
+    Non-secret fields (host, port, url, ...) and secret fields are all stored
+    inside the single AES-256-GCM `blob`; only `name`, `type` and `note` stay
+    in plaintext metadata so the list view never exposes values.
+    """
     v = open_vault(namespace)
     path = _secret_path(v, name)
     created = _ts()
     if path.exists():
         created = json.loads(path.read_text(encoding="utf-8")).get("created", created)
-    blob = _aes_gcm_encrypt(v["dek"], value.encode("utf-8"))
-    rec = {"name": name, "note": note, "created": created,
-           "updated": _ts(), "blob": _b64e(blob)}
-    path.write_text(json.dumps(rec, indent=2), encoding="utf-8")
-    return {"name": name, "note": note, "created": created, "updated": rec["updated"]}
+    rec = {
+        "name": name,
+        "type": type_,
+        "note": note,
+        "created": created,
+        "updated": _ts(),
+        "blob": _encrypt_fields(v["dek"], fields),
+    }
+    path.write_text(json.dumps(rec, indent=2, ensure_ascii=False), encoding="utf-8")
+    return {"name": name, "type": type_, "note": note,
+            "created": created, "updated": rec["updated"]}
 
 
-def get_credential(namespace: str | None, name: str) -> str:
+def load_record(namespace: str | None, name: str) -> dict:
+    """Return the full record with decrypted `fields` (for editing)."""
     v = open_vault(namespace)
     path = _secret_path(v, name)
     if not path.exists():
         raise KeyError(f"credential '{name}' not found")
     rec = json.loads(path.read_text(encoding="utf-8"))
-    return _aes_gcm_decrypt(v["dek"], _b64d(rec["blob"])).decode("utf-8")
+    return {
+        "name": rec["name"],
+        "type": rec.get("type", "generic"),
+        "note": rec.get("note", ""),
+        "fields": _decrypt_fields(v["dek"], rec["blob"]),
+        "created": rec.get("created", ""),
+        "updated": rec.get("updated", ""),
+    }
+
+
+def get_fields(namespace: str | None, name: str) -> dict:
+    return load_record(namespace, name)["fields"]
+
+
+def get_credential(namespace: str | None, name: str) -> str:
+    """Return the primary secret of a credential (for AI tools / vault_http)."""
+    r = load_record(namespace, name)
+    f = r["fields"]
+    prim = PRIMARY_FIELD.get(r["type"], "value")
+    if f.get(prim) not in (None, ""):
+        return f[prim]
+    for val in f.values():          # fallback: first non-empty field
+        if val not in (None, ""):
+            return val
+    return ""
 
 
 def list_credentials(namespace: str | None) -> list:
     v = open_vault(namespace)
     items = []
-    for f in v["secrets"].glob("*.json"):
-        rec = json.loads(f.read_text(encoding="utf-8"))
-        items.append({"name": rec["name"], "note": rec.get("note", ""),
-                      "created": rec.get("created", ""),
-                      "updated": rec.get("updated", "")})
+    for p in v["secrets"].glob("*.json"):
+        rec = json.loads(p.read_text(encoding="utf-8"))
+        items.append({
+            "name": rec.get("name"),
+            "type": rec.get("type", "generic"),
+            "note": rec.get("note", ""),
+            "created": rec.get("created", ""),
+            "updated": rec.get("updated", ""),
+        })
     return items
 
 
