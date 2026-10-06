@@ -39,12 +39,74 @@ def _users_state_path() -> Path:
     return Path(_default_vault_dir()) / ".users_state.json"
 
 
+def config_path(path: str | None = None) -> str:
+    return path or os.environ.get("VAULT_CONFIG", "config.yaml")
+
+
 def load_config(path: str | None = None) -> dict:
-    path = path or os.environ.get("VAULT_CONFIG", "config.yaml")
+    path = config_path(path)
     with open(path, "r", encoding="utf-8") as f:
         if yaml is not None and path.endswith((".yaml", ".yml")):
             return yaml.safe_load(f) or {}
         return json.load(f)
+
+
+def save_config(cfg: dict, path: str | None = None) -> None:
+    """Atomically rewrite the operator config (used by admin user management)."""
+    path = config_path(path)
+    is_yaml = yaml is not None and path.endswith((".yaml", ".yml"))
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        if is_yaml:
+            yaml.safe_dump(cfg, f, sort_keys=False, allow_unicode=True)
+        else:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
+    try:
+        os.chmod(path, 0o600)
+    except Exception:
+        pass
+
+
+def add_or_update_user(cfg: dict, username: str, password_hash: str,
+                       mcp_token: str | None = None) -> dict:
+    """Insert or replace a user record in-place; returns the record."""
+    users = cfg.setdefault("users", [])
+    for u in users:
+        if u.get("username") == username:
+            u["password_hash"] = password_hash
+            if mcp_token:
+                u["mcp_token"] = mcp_token
+            return u
+    rec = {"username": username, "password_hash": password_hash,
+           "mcp_token": mcp_token or "", "totp_secret": None}
+    users.append(rec)
+    return rec
+
+
+def set_password_hash(cfg: dict, username: str, password_hash: str) -> bool:
+    for u in get_users(cfg):
+        if u.get("username") == username:
+            u["password_hash"] = password_hash
+            return True
+    return False
+
+
+def set_user_token(cfg: dict, username: str, token: str) -> bool:
+    for u in get_users(cfg):
+        if u.get("username") == username:
+            u["mcp_token"] = token
+            return True
+    return False
+
+
+def delete_user(cfg: dict, username: str) -> bool:
+    users = get_users(cfg)
+    keep = [u for u in users if u.get("username") != username]
+    if len(keep) == len(users):
+        return False
+    cfg["users"] = keep
+    return True
 
 
 def get_users(cfg: dict) -> list:
@@ -101,3 +163,17 @@ def save_user_state(username: str, patch: dict) -> None:
         p.chmod(0o600)
     except Exception:
         pass
+
+
+def clear_user_state(username: str) -> None:
+    """Drop a user's runtime state (used to reset 2FA when a user is removed)."""
+    p = _users_state_path()
+    if not p.exists():
+        return
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if username in data:
+        del data[username]
+        p.write_text(json.dumps(data, indent=2), encoding="utf-8")
