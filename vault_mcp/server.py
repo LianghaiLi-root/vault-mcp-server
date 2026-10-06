@@ -1274,10 +1274,16 @@ def _clear_fails(ip: str) -> None:
 
 
 @app.post("/login")
-def login(request: Request, username: str = Form(...),
-          password: str = Form(...), totp: str = Form(""),
+def login(request: Request, username: str = Form(""),
+          password: str = Form(""), totp: str = Form(""),
           captcha_id: str = Form(""), captcha_answer: str = Form(""),
           cf_turnstile: str = Form("", alias="cf-turnstile-response")):
+    # Declared with empty defaults rather than Form(...): a blank field is
+    # dropped by the form parser, which would otherwise surface as a raw 422
+    # JSON error instead of the login page. Non-browser clients hit this too.
+    if not username or not password:
+        return _login_html("请输入用户名和密码", 401)
+
     sec = config.security_settings(app.state.cfg)
     ip = _client_ip(request)
     wait = _throttled(ip, int(sec.get("login_max_failures") or 0),
