@@ -7,3 +7,6 @@ jinja2
 pyyaml
 mcp==1.30.0
 sse-starlette
+# Image-based login captcha (numeric / image modes). Optional: without it those
+# modes degrade to an arithmetic question instead of failing open.
+Pillow>=10
