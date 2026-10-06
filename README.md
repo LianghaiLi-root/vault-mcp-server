@@ -17,13 +17,27 @@ has an isolated namespace; access control is enforced server-side.
 > decrypt every user's vault. That is the intended trade-off of a *hosted* vault
 > vs. the purely local DPAPI model. Protect that password like a root key.
 
+## Features
+
+**Web console** (glassmorphism UI, three tabs)
+
+| Tab | What you can do |
+|-----|-----------------|
+| **凭据管理** Credentials | Add / edit / delete typed credentials (SSH / web / API / DB / generic). The form renders the fields for the selected type automatically. |
+| **安全设置** Security | Enroll / reset TOTP 2FA, view & regenerate your MCP token, change your login password. |
+| **运维 / 用户** Ops | Server status; **user management** (add user, reset password, reset 2FA, re-issue MCP token, delete user) written straight back to `config.yaml`; **SSH quick-ops** command generator (keygen, copy-id, connect test, alias, agent, remote useradd/passwd/authorized_keys/harden); credential-store integrity check. |
+
+**MCP tools:** `vault_save`, `vault_get`, `vault_list`, `vault_delete`, and
+`vault_http` (AI-blind HTTP call — the secret is injected server-side and never
+returned to the model).
+
 ## Layout
 
 | Path | Purpose |
 |------|---------|
 | `vault_mcp/vault_core.py` | Crypto + per-user encrypted storage (stdlib + `cryptography`) |
 | `vault_mcp/auth.py` | scrypt password hashing, TOTP (RFC 6238), HMAC session tokens |
-| `vault_mcp/config.py` | Loads `config.yaml`, user lookup, 2FA state persistence |
+| `vault_mcp/config.py` | Loads/writes `config.yaml`, user CRUD, 2FA state persistence |
 | `vault_mcp/server.py` | FastAPI app: web console + remote MCP (`/mcp`) |
 | `vault_mcp/stdio.py` | Local **stdio** MCP server (agent use on this machine) |
 | `vault_mcp/cli.py` | Operator CLI to provision users / tokens |
@@ -101,13 +115,29 @@ namespace. There is also an **AI-blind** tool:
   restricts destinations. Use this instead of `vault_get` whenever the AI only
   needs to *call* an API, not see the secret.
 
+### DNS-rebinding protection
+
+The `/mcp` endpoint validates the `Host` header and answers **HTTP 421** for
+anything not whitelisted. List your public domain(s) in `config.yaml`:
+
+```yaml
+mcp:
+  allowed_hosts:
+    - test.example.com
+    - 127.0.0.1:8080
+    - localhost:8080
+```
+
+`allowed_origins` defaults to `https://<each allowed_host>`. The protection is
+never disabled — it is a deliberate anti-DNS-rebinding guard.
+
 Example `mcp.json` snippet for WorkBuddy:
 
 ```json
 {
   "mcpServers": {
     "vault-remote": {
-      "url": "http://<host>:8080/mcp",
+      "url": "https://test.example.com/mcp",
       "headers": { "Authorization": "Bearer <admin mcp_token>" }
     }
   }
