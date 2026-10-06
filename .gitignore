@@ -4,6 +4,11 @@ __pycache__/
 .venv/
 venv/
 
+# Python package build artifacts
+*.egg-info/
+build/
+dist/
+
 # Runtime secrets / vault data — never commit
 .vault-data/
 vault-data/

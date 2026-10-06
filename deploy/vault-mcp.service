@@ -1,0 +1,30 @@
+[Unit]
+Description=Vault MCP Server (credential vault + remote MCP)
+Documentation=https://github.com/LianghaiLi-root/vault-mcp-server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vault
+Group=vault
+WorkingDirectory=/opt/vault-mcp-server
+
+# EnvironmentFile: one KEY=VALUE per line, NO quotes. chmod 600, owned by vault.
+EnvironmentFile=/opt/vault-mcp-server/.env
+
+ExecStart=/opt/vault-mcp-server/.venv/bin/python -m uvicorn vault_mcp.server:app --host 127.0.0.1 --port 8080
+ExecReload=/bin/kill -s HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+# --- security hardening ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/vault-mcp
+# app code stays read-only; only the vault data dir is writable
+
+[Install]
+WantedBy=multi-user.target

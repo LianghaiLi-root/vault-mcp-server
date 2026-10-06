@@ -25,15 +25,16 @@ import os
 import json
 import hmac
 import contextvars
+import urllib.request
+import urllib.error
+import urllib.parse
 
 from fastapi import FastAPI, Request, HTTPException, Form, Depends
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from jinja2 import Template
 from mcp.server.fastmcp import FastMCP
 
-import config
-import auth
-import vault_core
+from . import config, auth, vault_core
 
 auth_user_ctx = contextvars.ContextVar("auth_user", default=None)
 
@@ -227,6 +228,66 @@ def vault_delete(name: str) -> str:
         return f"ERROR: {e}"
 
 
+@mcp.tool()
+def vault_http(name: str, url: str, method: str = "GET",
+               headers: dict = None, body: str = None,
+               secret_header: str = None, secret_scheme: str = "Bearer") -> str:
+    """AI-BLIND HTTP client: call an API using a stored credential WITHOUT the
+    secret ever leaving the server or being returned to you.
+
+    The secret is injected server-side. Two ways to place it:
+      * write the literal placeholder `{{secret}}` anywhere in `headers` values
+        or `body`; it is replaced with the credential value, or
+      * set `secret_header` (e.g. "Authorization") and the secret is sent as
+        `<secret_scheme> <secret>` (e.g. "Bearer <secret>") automatically.
+
+    Returns the HTTP status and (truncated) response body. The secret is
+    redacted from the response and is never included in the output.
+
+    Guards: only https is allowed; an optional host allow-list may be set in
+    config under `http.allow_hosts`; responses are truncated to 64 KiB.
+    """
+    ns = _ns()
+    if not ns:
+        return "ERROR: unauthorized"
+    try:
+        secret = vault_core.get_credential(ns, name)
+    except Exception as e:
+        return f"ERROR: {e}"
+
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https":
+        return "ERROR: only https URLs are allowed"
+    allowed = (app.state.cfg.get("http", {}) or {}).get("allow_hosts")
+    if allowed and parsed.hostname not in allowed:
+        return f"ERROR: host '{parsed.hostname}' not in allow-list"
+
+    hdrs = {k: (v or "").replace("{{secret}}", secret) for k, v in (headers or {}).items()}
+    if secret_header:
+        hdrs[secret_header] = f"{secret_scheme} {secret}" if secret_scheme else secret
+    if body:
+        body = body.replace("{{secret}}", secret)
+
+    data = body.encode("utf-8") if body else None
+    req = urllib.request.Request(url, data=data, method=method.upper())
+    for k, v in hdrs.items():
+        req.add_header(k, v)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            out, status = resp.read(), resp.status
+    except urllib.error.HTTPError as e:
+        out, status = e.read(), e.code
+    except Exception as e:
+        return f"ERROR: {e}"
+
+    MAX = 64 * 1024
+    text = out.decode("utf-8", "replace")
+    text = text.replace(secret, "***REDACTED***")  # never leak the secret back
+    if len(text) > MAX:
+        text = text[:MAX] + f"\n... (truncated, {len(text)} bytes total)"
+    return f"HTTP {status}\n{text}"
+
+
 session_manager = mcp.streamable_http_app()
 
 
@@ -358,9 +419,13 @@ async def api_totp_confirm(request: Request):
 # --------------------------------------------------------------------------
 # Entrypoint
 # --------------------------------------------------------------------------
-if __name__ == "__main__":
+def main():
     import uvicorn
     s = config.server_settings(cfg)
     host = s.get("host", os.environ.get("VAULT_HOST", "0.0.0.0"))
     port = int(s.get("port", os.environ.get("VAULT_PORT", "8080")))
     uvicorn.run(app, host=host, port=port)
+
+
+if __name__ == "__main__":
+    main()

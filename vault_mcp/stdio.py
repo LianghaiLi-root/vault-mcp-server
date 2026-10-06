@@ -12,7 +12,7 @@ Tools: vault_save / vault_get / vault_list / vault_delete
 
 import os
 import json
-import vault_core as V
+from . import vault_core as V
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("vault-mcp")

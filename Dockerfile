@@ -16,4 +16,5 @@ ENV VAULT_DIR=/data/vault \
 VOLUME /data
 EXPOSE 8080
 
-CMD ["python", "server.py"]
+# Run the package: `python -m vault_mcp` starts the web console + remote MCP.
+CMD ["python", "-m", "vault_mcp"]

@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vault-mcp-server"
+version = "0.1.0"
+description = "Deployable multi-user credential vault with a web console and a remote MCP endpoint."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "cryptography>=42",
+    "fastapi",
+    "uvicorn[standard]",
+    "python-multipart",
+    "jinja2",
+    "pyyaml",
+    "mcp==1.30.0",
+    "sse-starlette",
+]
+
+# Console entry points (available after `pip install .`):
+#   vault-mcp-server  -> starts the web + remote MCP server
+#   vault-mcp-cli     -> operator CLI (add-user / set-token / list-users)
+[project.scripts]
+vault-mcp-server = "vault_mcp.server:main"
+vault-mcp-cli = "vault_mcp.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["vault_mcp*"]

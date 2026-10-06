@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """
-vault_cli.py — operator tool to provision users in config.yaml.
+cli.py — operator tool to provision users in config.yaml.
 
 Users are pre-provisioned here (the web UI lets them enroll 2FA afterwards).
 Never commit real password hashes / tokens; use this tool on the server.
 
 Examples
 --------
-  python vault_cli.py add-user alice
-  python vault_cli.py set-token alice
-  python vault_cli.py list-users
+  python -m vault_mcp.cli add-user alice
+  python -m vault_mcp.cli set-token alice
+  python -m vault_mcp.cli list-users
 """
 
 import os
 import sys
+import json
 import getpass
 import argparse
 
 import yaml
-import auth
-import config as cfgmod
+from . import auth, config as cfgmod
 
 
 def _load_raw(path):
@@ -68,7 +68,7 @@ def list_users(path):
     sp = cfgmod._users_state_path()
     if sp.exists():
         try:
-            state = __import__("json").loads(sp.read_text(encoding="utf-8"))
+            state = json.loads(sp.read_text(encoding="utf-8"))
         except Exception:
             state = {}
     for u in data.get("users", []):
