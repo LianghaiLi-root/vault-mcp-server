@@ -11,6 +11,22 @@ server:
   host: 0.0.0.0
   port: 8080
 
+# Remote MCP endpoint (/mcp) — DNS-rebinding protection is always ON.
+# Whitelist the hostnames you actually expose; a request whose Host header is
+# not listed gets HTTP 421. Behind nginx/Cloudflare use the PUBLIC domain.
+mcp:
+  allowed_hosts:
+    - vault.example.com
+    - 127.0.0.1:8080
+    - localhost:8080
+  # allowed_origins:            # optional; defaults to https://<each allowed_host>
+  #   - https://vault.example.com
+
+# Optional: restrict the AI-blind vault_http tool to specific hosts.
+# http:
+#   allow_hosts:
+#     - api.github.com
+
 users:
   - username: admin
     # Generate with: python -m vault_mcp.cli add-user admin
