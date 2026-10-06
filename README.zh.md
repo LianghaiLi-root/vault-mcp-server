@@ -44,6 +44,29 @@
 > 一旦开启就只能登服务器改 `config.yaml` 才能恢复。启用开关时界面会二次确认，
 > 提示你需先在 Cloudflare 侧配好 Access 应用。
 
+**人机验证**（登录页，仅 `admin` 可改，写入 `config.yaml` 的 `captcha` 段）
+
+在密码校验**之前**拦截自动化撞库。四种方式任选：
+
+| 方式 | 说明 |
+|------|------|
+| `off` | 关闭 |
+| `numeric` | 数字验证码 —— 图片形式，纯数字 |
+| `image` | 图形验证码 —— 字母 + 数字，带干扰线与噪点 |
+| `turnstile` | **Cloudflare Turnstile 自动验证** —— 用户只需勾选，通常无需输入 |
+
+- **图片验证码**由 Pillow 渲染成 PNG（不使用 SVG —— SVG 里文字是明文，等于没做防护）。
+  若服务器未安装 Pillow，会自动降级为「算术题」形式，**绝不会降级成「不验证」**；
+  管理端会显示提示。
+- **Turnstile 必须先填密钥才能启用**：Site Key 与 Secret Key 缺一不可，
+  否则保存会被直接拒绝并提示缺哪一项。Secret Key **不会回显**到浏览器，
+  界面只显示「是否已设置」；要更换就直接填新的，要清空用「清除 Secret」。
+- 答案为**服务端持有**：浏览器只拿到一个不透明 id，答案存于内存、5 分钟过期、
+  **一次性消费**（重放无效）。验证失败计入登录失败限流。
+- 密钥写错时登录页会显示可读的错误提示（含 Cloudflare 错误码），而不是空白框。
+
+> Pillow 是可选依赖：`pip install Pillow`。缺失时数字 / 图形模式自动降级。
+
 **MCP 工具：** `vault_save`、`vault_get`、`vault_list`、`vault_delete`，以及
 `vault_http`（AI 盲调 HTTP —— 秘密由服务端注入，永不返回给模型）。
 
@@ -53,7 +76,8 @@
 |------|------|
 | `vault_mcp/vault_core.py` | 加密 + 多用户加密存储（标准库 + `cryptography`） |
 | `vault_mcp/auth.py` | scrypt 密码哈希、TOTP（RFC 6238）、HMAC 会话令牌 |
-| `vault_mcp/config.py` | 加载 `config.yaml`、用户查找、**角色判定**、Web 加固设置、2FA 状态持久化 |
+| `vault_mcp/config.py` | 加载 `config.yaml`、用户查找、**角色判定**、Web 加固与人机验证设置、2FA 状态持久化 |
+| `vault_mcp/captcha.py` | 登录人机验证：图片验证码渲染、一次性答案存储、Cloudflare Turnstile 校验 |
 | `vault_mcp/server.py` | FastAPI 应用：Web 控制台 + 远程 MCP（`/mcp`） |
 | `vault_mcp/stdio.py` | 本地 **stdio** MCP 服务（本机上的智能体使用） |
 | `vault_mcp/cli.py` | 运维 CLI，用于预置用户 / 令牌 |
