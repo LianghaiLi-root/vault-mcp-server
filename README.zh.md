@@ -11,6 +11,19 @@
 
 > ⚠️ 在远程 / 可信服务器上，宿主持有 `VAULT_MASTER_PASSWORD`，因此可以解密每个用户的保险库。这是*托管型*保险库相对于纯本地 DPAPI 模型的固有取舍。请像对待根密钥一样保护这个密码。
 
+## 功能特性
+
+**Web 控制台**（毛玻璃风格，三个标签页）
+
+| 标签页 | 能力 |
+|--------|------|
+| **凭据管理** | 新增 / 修改 / 删除带类型的凭据（SSH / 网站 / API / 数据库 / 通用）。表单会按所选类型自动渲染对应字段。 |
+| **安全设置** | 启用 / 重置 TOTP 双因素、查看与重新生成 MCP Token、修改登录密码。 |
+| **运维 / 用户** | 服务器状态；**用户管理**（新增用户、重置密码、重置 2FA、重签 MCP Token、删除用户，直接写回 `config.yaml`）；**SSH 快捷运维**命令生成器（生成密钥对、推送公钥、连接测试、写别名、加入 agent、远端新增用户 / 改密码 / 部署 authorized_keys / 加固 SSH）；凭据存储完整性校验。 |
+
+**MCP 工具：** `vault_save`、`vault_get`、`vault_list`、`vault_delete`，以及
+`vault_http`（AI 盲调 HTTP —— 秘密由服务端注入，永不返回给模型）。
+
 ## 目录结构
 
 | 路径 | 作用 |
@@ -79,13 +92,27 @@ docker compose up --build
 
 * **`vault_http(name, url, method, headers, body, secret_header)`** —— 服务端以存储的秘密发起对 `url` 的请求（在 headers / body 中使用占位符 `{{secret}}`，或使用具名的 `secret_header`），仅返回 HTTP 响应。秘密**永远不会**回传给模型，并且会从响应中被擦除。只允许 `https`；可选的 `http.allow_hosts` 用于限制目标地址。当 AI 只需要*调用*某个 API 而不需要看见秘密时，请使用它代替 `vault_get`。
 
+### DNS 重绑定防护
+
+`/mcp` 端点会校验 `Host` 请求头，未列入白名单的请求返回 **HTTP 421**。请在 `config.yaml` 中登记你的公网域名：
+
+```yaml
+mcp:
+  allowed_hosts:
+    - test.example.com
+    - 127.0.0.1:8080
+    - localhost:8080
+```
+
+`allowed_origins` 默认取 `https://<每个 allowed_host>`。该防护不会被关闭——它是一道刻意保留的反 DNS 重绑定防线。
+
 WorkBuddy 的 `mcp.json` 配置示例：
 
 ```json
 {
   "mcpServers": {
     "vault-remote": {
-      "url": "http://<host>:8080/mcp",
+      "url": "https://test.example.com/mcp",
       "headers": { "Authorization": "Bearer <admin mcp_token>" }
     }
   }
