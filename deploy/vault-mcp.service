@@ -20,11 +20,19 @@ RestartSec=5
 
 # --- security hardening ---
 NoNewPrivileges=true
-ProtectSystem=strict
+# ProtectSystem=full makes /usr, /boot and /etc read-only. We deliberately do NOT
+# use "strict" here: strict remounts the WHOLE filesystem read-only, and a
+# ReadWritePaths entry pointing at a file inside an already read-only tree is
+# silently ignored by systemd (verified on systemd 255) — which made every admin
+# config write fail with "[Errno 30] Read-only file system".
+ProtectSystem=full
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/var/lib/vault-mcp
-# app code stays read-only; only the vault data dir is writable
+# Writable: vault data + operator config (the admin API rewrites config.yaml).
+ReadWritePaths=/var/lib/vault-mcp /opt/vault-mcp-server
+# ...but pin the application code itself read-only, so a compromised process
+# cannot rewrite its own source.
+ReadOnlyPaths=/opt/vault-mcp-server/vault_mcp
 
 [Install]
 WantedBy=multi-user.target
