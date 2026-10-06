@@ -1,0 +1,122 @@
+> 🌐 [English](README.md)
+
+# Vault MCP Server（凭据库服务）
+
+一个可部署、多用户的**凭据保险库**，同时提供：
+
+* 一个 **Web 控制台**（登录 + TOTP 双因素认证 + 每用户凭据管理），以及
+* 一个 **远程 MCP 端点**（`/mcp`，基于 Streamable HTTP），让 AI 客户端可以使用秘密，而秘密永远不需要被手动敲进聊天框。
+
+秘密在静态存储时使用 **AES-256-GCM** 加密。主密钥由平台提供：**Windows DPAPI**（零配置，绑定你的账户）或 **PBKDF2-HMAC-SHA256**（由 `VAULT_MASTER_PASSWORD` 派生，用于 Linux / 服务器）。每个用户拥有相互隔离的命名空间；访问控制由服务端强制执行。
+
+> ⚠️ 在远程 / 可信服务器上，宿主持有 `VAULT_MASTER_PASSWORD`，因此可以解密每个用户的保险库。这是*托管型*保险库相对于纯本地 DPAPI 模型的固有取舍。请像对待根密钥一样保护这个密码。
+
+## 目录结构
+
+| 路径 | 作用 |
+|------|------|
+| `vault_mcp/vault_core.py` | 加密 + 多用户加密存储（标准库 + `cryptography`） |
+| `vault_mcp/auth.py` | scrypt 密码哈希、TOTP（RFC 6238）、HMAC 会话令牌 |
+| `vault_mcp/config.py` | 加载 `config.yaml`、用户查找、2FA 状态持久化 |
+| `vault_mcp/server.py` | FastAPI 应用：Web 控制台 + 远程 MCP（`/mcp`） |
+| `vault_mcp/stdio.py` | 本地 **stdio** MCP 服务（本机上的智能体使用） |
+| `vault_mcp/cli.py` | 运维 CLI，用于预置用户 / 令牌 |
+| `vault_mcp/__main__.py` | `python -m vault_mcp` 入口（启动服务） |
+| `pyproject.toml` | 包元数据、依赖、控制台入口 |
+| `deploy/` | systemd 单元、nginx TLS 反向代理、`.env` 模板 |
+| `config.example.yaml` | 运维配置模板（用户 + 服务 + 保险库目录） |
+
+## 快速开始（Linux 服务器）
+
+```bash
+pip install -r requirements.txt
+
+# 0. 从示例创建你的工作配置
+cp config.example.yaml config.yaml
+
+# 1. 设置主密码（服务器可凭此解密所有保险库）
+export VAULT_MASTER_PASSWORD="$(openssl rand -hex 32)"
+export VAULT_FORCE_PBKDF2=1
+export VAULT_DIR=/var/lib/vault-mcp/vault
+
+# 2. 预置一个用户（向 config.yaml 写入 scrypt 哈希 + mcp_token）
+python -m vault_mcp.cli add-user admin
+
+# 3. 运行（生产环境请置于 TLS / 反向代理之后）
+VAULT_COOKIE_SECURE=1 uvicorn vault_mcp.server:app --host 0.0.0.0 --port 8080
+#    或者更简单：python -m vault_mcp
+```
+
+打开 `http://<host>:8080/`，登录后（可选）在 **两步验证** 下启用 Google 身份验证器。
+
+## Docker
+
+```bash
+echo "VAULT_MASTER_PASSWORD=$(openssl rand -hex 32)" > .env
+python -m vault_mcp.cli add-user admin          # 生成 config.yaml + token
+docker compose up --build
+```
+
+挂载你自己的 `config.yaml`，并为 `/data`（保险库存储）挂载卷。
+
+## 远程 MCP 客户端
+
+将你的 MCP 客户端指向 `http://<host>:8080/mcp`，并使用用户的 `mcp_token` 作为 **Bearer** 令牌进行认证。四个工具——`vault_save`、`vault_get`、`vault_list`、`vault_delete`——只在该用户的命名空间内操作。此外还有一个 **对 AI 不可见（AI-blind）** 的工具：
+
+* **`vault_http(name, url, method, headers, body, secret_header)`** —— 服务端以存储的秘密发起对 `url` 的请求（在 headers / body 中使用占位符 `{{secret}}`，或使用具名的 `secret_header`），仅返回 HTTP 响应。秘密**永远不会**回传给模型，并且会从响应中被擦除。只允许 `https`；可选的 `http.allow_hosts` 用于限制目标地址。当 AI 只需要*调用*某个 API 而不需要看见秘密时，请使用它代替 `vault_get`。
+
+WorkBuddy 的 `mcp.json` 配置示例：
+
+```json
+{
+  "mcpServers": {
+    "vault-remote": {
+      "url": "http://<host>:8080/mcp",
+      "headers": { "Authorization": "Bearer <admin mcp_token>" }
+    }
+  }
+}
+```
+
+> 注意：你的客户端必须支持*远程*（基于 URL 的）MCP。如果只支持本地 stdio，可以在服务器上运行 `python -m vault_mcp.stdio` 并通过 stdio 连接，或者在前面加一个本地 stdio↔HTTP 转换层。
+
+## 生产部署（systemd + nginx）
+
+[`deploy/`](deploy/) 里的文件用于将服务挂载在 Linux 机器的 TLS 之后：
+
+```bash
+# 1. 以专用的非特权用户安装
+useradd --system --home /opt/vault-mcp-server --create-home vault
+git clone <your-repo> /opt/vault-mcp-server
+cd /opt/vault-mcp-server && python -m venv .venv && .venv/bin/pip install -r requirements.txt
+
+# 2. 预置配置 + 密钥
+cp config.example.yaml config.yaml
+.venv/bin/python -m vault_mcp.cli add-user admin
+cp deploy/env.example .env
+#   编辑 .env：设置 VAULT_MASTER_PASSWORD（openssl rand -hex 32）并执行 chmod 600 .env
+
+# 3. systemd
+cp deploy/vault-mcp.service /etc/systemd/system/
+mkdir -p /var/lib/vault-mcp && chown -R vault:vault /var/lib/vault-mcp
+systemctl daemon-reload && systemctl enable --now vault-mcp
+
+# 4. nginx（TLS）
+cp deploy/nginx-vault-mcp.conf /etc/nginx/sites-available/vault-mcp.conf
+ln -s /etc/nginx/sites-available/vault-mcp.conf /etc/nginx/sites-enabled/
+#   编辑 server_name + 证书路径，然后：nginx -t && systemctl reload nginx
+```
+
+该单元仅将 uvicorn 绑定到 `127.0.0.1:8080`；nginx 终止 TLS 并代理 `/`（Web 控制台）和 `/mcp`（远程 MCP）。在 TLS 之后必须设置 `VAULT_COOKIE_SECURE=1`。
+
+## 安全清单
+
+- [ ] `VAULT_MASTER_PASSWORD` 来自密钥管理器，绝不提交进仓库。
+- [ ] 前置 TLS（反向代理 / Cloudflare）；设置 `VAULT_COOKIE_SECURE=1`。
+- [ ] `config.yaml`（哈希 + 令牌）不提交，已被 `.gitignore` 忽略。
+- [ ] 首次登录后为用户启用 2FA。
+- [ ] 对 `/login` 和 `/mcp` 端点做速率限制 / WAF。
+
+## 许可证
+
+MIT —— 见 `LICENSE`。
