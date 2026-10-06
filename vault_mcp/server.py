@@ -477,7 +477,7 @@ DASH_TPL = Template("""
      <option value="ssh-useradd">远端新增用户 (useradd + sudo)</option>
      <option value="ssh-passwd">远端修改用户密码 (passwd)</option>
      <option value="ssh-authkeys">远端部署 authorized_keys</option>
-     <option value="ssh-2fa-disable">远端关闭 SSH 密码登录</option>
+     <option value="ssh-disable-pw">远端关闭 SSH 密码登录</option>
    </select>
    <div style="margin-top:16px"><button class="mini" id="sshgen">生成命令</button></div>
    <pre id="sshout" style="display:none"></pre>
@@ -649,22 +649,39 @@ DASH_TPL = Template("""
  };
 
  // ---- ssh command generator ----
- const TEMPL=[];
+ // NOTE: every newline inside a JS string literal MUST be written as \\n here,
+ // otherwise Python turns it into a real line break and the whole <script>
+ // dies with "Invalid or unexpected token" (which kills ALL page handlers).
  $('sshgen').onclick=()=>{
    const h=$('ssh_host').value.trim()||'myserver';
    const u=$('ssh_user').value.trim()||'root';
    const a=$('ssh_action').value;
    const target=u+'@'+h;
+   const safe=h.replace(/[^a-zA-Z0-9_.-]/g,'_');
+   const kf='~/.ssh/id_ed25519_'+safe;
+   const NL='\\n';
    const map={
-     'ssh-keygen':'ssh-keygen -t ed25519 -a 100 -C "'+u+'@'+h+'" -f ~/.ssh/id_ed25519_'+h.replace(/[^a-zA-Z0-9_.-]/g,'_')+'\nchmod 600 ~/.ssh/id_ed25519_'+h.replace(/[^a-zA-Z0-9_.-]/g,'_')+'*',
-     'ssh-copy-id':'ssh-copy-id -i ~/.ssh/id_ed25519_'+h.replace(/[^a-zA-Z0-9_.-]/g,'_')+'.pub '+target,
+     'ssh-keygen':[
+       'ssh-keygen -t ed25519 -a 100 -C "'+u+'@'+h+'" -f '+kf,
+       'chmod 600 '+kf+' '+kf+'.pub',
+     ].join(NL),
+     'ssh-copy-id':'ssh-copy-id -i '+kf+'.pub '+target,
      'ssh-connect':'ssh -v -p 22 '+target,
-     'ssh-config':'cat >> ~/.ssh/config <<\'EOF\'\nHost '+h+'\n    HostName '+h+'\n    User '+u+'\n    IdentityFile ~/.ssh/id_ed25519_'+h.replace(/[^a-zA-Z0-9_.-]/g,'_')+'\n    ServerAliveInterval 30\nEOF\nchmod 600 ~/.ssh/config',
-     'ssh-add':'ssh-add ~/.ssh/id_ed25519_'+h.replace(/[^a-zA-Z0-9_.-]/g,'_')+'\nssh-add -l',
+     'ssh-config':[
+       "cat >> ~/.ssh/config <<'EOF'",
+       'Host '+h,
+       '    HostName '+h,
+       '    User '+u,
+       '    IdentityFile '+kf,
+       '    ServerAliveInterval 30',
+       'EOF',
+       'chmod 600 ~/.ssh/config',
+     ].join(NL),
+     'ssh-add':['ssh-add '+kf, 'ssh-add -l'].join(NL),
      'ssh-useradd':'ssh '+target+' "sudo useradd -m -s /bin/bash NEWUSER && sudo passwd NEWUSER"',
      'ssh-passwd':'ssh '+target+' "sudo passwd TARGETUSER"',
-     'ssh-authkeys':'ssh '+target+' "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys" < ~/.ssh/id_ed25519_'+h.replace(/[^a-zA-Z0-9_.-]/g,'_')+'.pub',
-     'ssh-2fa-disable':'ssh '+target+' "sudo sed -i \\"s/^#\\?PasswordAuthentication.*/PasswordAuthentication no/\\" /etc/ssh/sshd_config && sudo systemctl restart sshd"',
+     'ssh-authkeys':'ssh '+target+' "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys" < '+kf+'.pub',
+     'ssh-disable-pw':'ssh '+target+' "sudo sed -i \\"s/^#*PasswordAuthentication.*/PasswordAuthentication no/\\" /etc/ssh/sshd_config && sudo systemctl restart sshd"',
    };
    $('sshout').style.display='block';
    $('sshout').textContent=map[a]||'';
