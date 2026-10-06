@@ -24,9 +24,11 @@ Security notes
 import os
 import json
 import hmac
+import time
 import asyncio
 import contextlib
 import contextvars
+import re
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -228,6 +230,9 @@ LOGIN_TPL = Template("""
  }
  h1{font-size:19px;margin:0}
  .sub{color:var(--txt-mute);font-size:12.5px;margin:2px 0 22px}
+ /* All three credential inputs share one width so the form is a clean column. */
+ .box form label{margin-top:14px}
+ .box form input{display:block;width:100%}
  button[type=submit]{width:100%;margin-top:22px;padding:12px}
  .alert{
    display:none;background:rgba(255,90,110,.13);border:1px solid rgba(255,90,110,.3);
@@ -243,9 +248,9 @@ LOGIN_TPL = Template("""
  </div>
  <div class="sub">加密凭据管理 · 多用户隔离</div>
  <form method="post" action="/login">
-  <label>用户名</label><input name="username" autocomplete="username" required autofocus>
+  <label>用户名</label><input name="username" type="text" autocomplete="username" required autofocus>
   <label>密码</label><input name="password" type="password" autocomplete="current-password" required>
-  <label>2FA 验证码（已启用时必填）</label><input name="totp" inputmode="numeric" autocomplete="one-time-code" placeholder="6 位数字" maxlength="6">
+  <label>2FA 验证码（已启用时必填）</label><input name="totp" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6 位数字" maxlength="6">
   <button type="submit">登 录</button>
  </form>
  <div class="alert {{ 'show' if error else '' }}">{{ error }}</div>
@@ -293,6 +298,21 @@ DASH_TPL = Template("""
  .kv .k{color:var(--txt-mute)}
  .danger-zone{border-color:rgba(255,90,110,.26)}
  .switchrow{display:flex;align-items:center;gap:10px;font-size:13.5px;color:var(--txt-dim)}
+ .switchrow input{width:auto;flex:none}
+ .switchcard{display:flex;align-items:flex-start;gap:12px;padding:12px 0;border-bottom:1px solid var(--stroke-soft)}
+ .switchcard:last-of-type{border-bottom:0}
+ .switchcard .txt{flex:1}
+ .switchcard .txt b{display:block;font-size:13.5px;font-weight:600;margin-bottom:3px}
+ .switchcard .txt span{font-size:12px;color:var(--txt-mute);line-height:1.5}
+ .toggle{position:relative;flex:none;width:46px;height:26px;border-radius:999px;border:1px solid var(--stroke);
+   background:rgba(9,12,18,.7);cursor:pointer;transition:background .2s,border-color .2s;padding:0;margin-top:2px}
+ .toggle::after{content:"";position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;
+   background:#8b95a1;transition:transform .2s,background .2s}
+ .toggle.on{background:linear-gradient(135deg,var(--accent),var(--accent-2));border-color:transparent}
+ .toggle.on::after{transform:translateX(20px);background:#fff}
+ .rolebadge{font-size:11.5px;font-weight:600;padding:2px 9px;border-radius:999px;
+   background:rgba(255,255,255,.09);border:1px solid var(--stroke);color:var(--txt-dim)}
+ .rolebadge.admin{background:rgba(91,140,255,.18);border-color:rgba(91,140,255,.34);color:#a9c6ff}
 </style></head><body>
 <div class="shell">
 
@@ -301,7 +321,7 @@ DASH_TPL = Template("""
     <div class="logo">🔐</div>
     <div>
       <h1>凭据库</h1>
-      <div class="who"><code>{{ user }}</code> · 模式 <code>{{ mode }}</code></div>
+      <div class="who"><code>{{ user }}</code> · <span class="rolebadge {{ role }}">{{ '管理员' if is_admin else '普通用户' }}</span> · 模式 <code>{{ mode }}</code></div>
     </div>
   </div>
   <div class="row">
@@ -315,7 +335,7 @@ DASH_TPL = Template("""
  <div class="tabs">
    <button class="tab on" data-pane="vault">凭据管理</button>
    <button class="tab" data-pane="security">安全设置</button>
-   <button class="tab" data-pane="ops">运维 / 用户</button>
+   {% if is_admin %}<button class="tab" data-pane="ops">运维 / 用户</button>{% endif %}
  </div>
 
  <!-- ============ 凭据管理 ============ -->
@@ -421,13 +441,14 @@ DASH_TPL = Template("""
   </div>
  </section>
 
- <!-- ============ 运维 / 用户 ============ -->
+ <!-- ============ 运维 / 用户（仅管理员可见） ============ -->
+ {% if is_admin %}
  <section id="pane-ops" class="pane">
   <div class="glass card">
    <h2>🖥️ 服务器状态</h2>
    <div class="hint">后端运行信息一览。</div>
    <div class="kv"><span class="k">存储模式</span><code>{{ mode }}</code></div>
-   <div class="kv"><span class="k">凭据总数</span><code>{{ items|length }}</code></div>
+   <div class="kv"><span class="k">凭据总数（我的）</span><code>{{ items|length }}</code></div>
    <div class="kv"><span class="k">用户总数</span><code>{{ users|length }}</code></div>
    <div class="kv"><span class="k">服务版本</span><code>{{ version }}</code></div>
    <div class="kv"><span class="k">运行平台</span><code>{{ platform }}</code></div>
@@ -436,15 +457,17 @@ DASH_TPL = Template("""
 
   <div class="glass card">
    <h2>👥 用户管理</h2>
-   <div class="hint">添加用户、重置密码、重置 2FA、重新签发 MCP Token。变更立即写入 config.yaml。</div>
+   <div class="hint">添加用户、修改用户名、重置密码、重置 2FA、重新签发 MCP Token。变更立即写入 config.yaml。</div>
    <div class="tablewrap">
-   <table><thead><tr><th>用户名</th><th>MCP Token</th><th>2FA</th><th style="text-align:right">操作</th></tr></thead>
+   <table><thead><tr><th>用户名</th><th>角色</th><th>MCP Token</th><th>2FA</th><th style="text-align:right">操作</th></tr></thead>
    <tbody id="userrows">
     {% for u in users %}<tr data-user="{{ u.username }}">
       <td><code>{{ u.username }}</code>{% if u.username == user %} <span class="badge">当前</span>{% endif %}</td>
+      <td><span class="rolebadge {{ u.role }}">{{ '管理员' if u.role == 'admin' else '普通用户' }}</span></td>
       <td class="muted" style="font-size:12.5px">{{ '已配置' if u.has_token else '缺失' }}</td>
       <td>{% if u.totp == 'enabled' %}<span class="ok">已启用</span>{% elif u.totp == 'pending' %}<span style="color:#ffd08a">待验证</span>{% else %}<span class="muted">未启用</span>{% endif %}</td>
       <td style="text-align:right;white-space:nowrap">
+        <button class="mini" data-act="rename" data-user="{{ u.username }}">改用户名</button>
         <button class="mini" data-act="pw" data-user="{{ u.username }}">改密码</button>
         <button class="mini" data-act="2fa" data-user="{{ u.username }}">重置2FA</button>
         <button class="mini" data-act="tok" data-user="{{ u.username }}">重签Token</button>
@@ -454,45 +477,62 @@ DASH_TPL = Template("""
    </tbody></table>
    </div>
    <div style="margin-top:16px" class="row">
-     <input type="text" id="newuser" placeholder="新用户名" autocomplete="off" style="max-width:200px">
+     <input type="text" id="newuser" placeholder="新用户名（仅小写字母/数字/_/-）" autocomplete="off" style="max-width:240px">
      <button id="adduser">添加用户</button>
    </div>
    <div class="msg" id="usermsg"></div>
   </div>
 
   <div class="glass card">
-   <h2>⚙️ SSH 快捷运维</h2>
-   <div class="hint">生成可直接粘贴到终端执行的命令（不在此处执行远程命令）。</div>
-   <div class="grid2">
-     <div><label>目标主机 / 别名</label><input type="text" id="ssh_host" placeholder="myserver"></div>
-     <div><label>SSH 用户</label><input type="text" id="ssh_user" placeholder="root"></div>
+   <h2>🛡️ Web 访问加固</h2>
+   <div class="hint">在反向代理 / CDN 边缘先做一层访问控制，未通过者连登录页都看不到。仅管理员可修改。</div>
+
+   <div class="switchcard">
+     <button class="toggle {{ 'on' if sec.require_cloudflare_access else '' }}" id="tg_cf" data-key="require_cloudflare_access"></button>
+     <div class="txt">
+       <b>Cloudflare Access 前置校验</b>
+       <span>开启后，所有请求必须带 Cloudflare Access 的 JWT 头（<code>Cf-Access-Jwt-Assertion</code>）或 <code>CF_Authorization</code> Cookie，
+       说明请求已通过 Cloudflare Zero Trust 的登录策略。未携带则直接 403，登录页也不会渲染。</span>
+     </div>
    </div>
-   <label>要生成的操作</label>
-   <select id="ssh_action">
-     <option value="ssh-keygen">初始化 SSH 密钥对 (ssh-keygen)</option>
-     <option value="ssh-copy-id">推送公钥到服务器 (ssh-copy-id)</option>
-     <option value="ssh-connect">测试连接 (ssh -v)</option>
-     <option value="ssh-config">写入 ~/.ssh/config 别名</option>
-     <option value="ssh-add">加入 ssh-agent (ssh-add)</option>
-     <option value="ssh-useradd">远端新增用户 (useradd + sudo)</option>
-     <option value="ssh-passwd">远端修改用户密码 (passwd)</option>
-     <option value="ssh-authkeys">远端部署 authorized_keys</option>
-     <option value="ssh-disable-pw">远端关闭 SSH 密码登录</option>
-   </select>
-   <div style="margin-top:16px"><button class="mini" id="sshgen">生成命令</button></div>
-   <pre id="sshout" style="display:none"></pre>
-   <div class="msg" id="sshmsg"></div>
+
+   <div class="switchcard">
+     <button class="toggle {{ 'on' if sec.force_secure_cookie else '' }}" id="tg_secure_cookie" data-key="force_secure_cookie"></button>
+     <div class="txt">
+       <b>强制 HTTPS 会话 Cookie</b>
+       <span>给会话 Cookie 加 <code>Secure</code> 标记，浏览器只在 HTTPS 下回传，避免明文链路泄露。</span>
+     </div>
+   </div>
+
+   <label style="margin-top:16px">自定义边缘校验头（可选）</label>
+   <div class="grid2">
+     <div><label>请求头名</label><input type="text" id="edge_hdr" placeholder="X-Edge-Secret" value="{{ sec.required_edge_header }}"></div>
+     <div><label>期望值</label><input type="text" id="edge_val" placeholder="留空则不校验" value="{{ sec.required_edge_header_value }}"></div>
+   </div>
+   <div class="hint" style="margin-top:10px">用于自建 nginx / 其他 CDN 注入的共享密钥，例如 <code>add_header X-Edge-Secret "xxx";</code>。留空表示不启用该项。</div>
+
+   <div class="grid2" style="margin-top:6px">
+     <div><label>登录失败上限（次）</label><input type="text" id="lmax" inputmode="numeric" value="{{ sec.login_max_failures }}"></div>
+     <div><label>锁定时间（秒）</label><input type="text" id="lsec" inputmode="numeric" value="{{ sec.login_lockout_seconds }}"></div>
+   </div>
+
+   <div style="margin-top:16px" class="row">
+     <button id="secsave">保存加固设置</button>
+     <button class="mini" id="secrefresh">重新读取</button>
+   </div>
+   <div class="msg" id="secmsg"></div>
   </div>
 
   <div class="glass card danger-zone">
    <h2>🧹 维护操作</h2>
-   <div class="hint">清理本命名空间的空记录等维护动作。</div>
+   <div class="hint">校验并整理<strong>当前登录用户</strong>的凭据存储。</div>
    <div class="row">
      <button class="mini" id="repair">校验并整理凭据存储</button>
    </div>
    <div class="msg" id="opsmsg"></div>
   </div>
  </section>
+ {% endif %}
 
 </div>
 
@@ -619,80 +659,66 @@ DASH_TPL = Template("""
    else say('pwmsg',false,'失败：'+d.error);
  };
 
- // ---- user management ----
- const um=$('usermsg');
- document.querySelectorAll('button[data-act]').forEach(b=>b.onclick=async()=>{
-   const act=b.dataset.act, uname=b.dataset.user;
-   if(act==='pw'){
-     const np=prompt('为 '+uname+' 设置新密码：'); if(!np) return;
-     const d=await j('/api/admin/users/'+encodeURIComponent(uname)+'/password','POST',{password:np});
-     say('usermsg', d.ok, d.ok?('✓ 已更新 '+uname+' 的密码'):('失败：'+d.error));
-   } else if(act==='2fa'){
-     if(!confirm('重置 '+uname+' 的 2FA 绑定？')) return;
-     const d=await j('/api/admin/users/'+encodeURIComponent(uname)+'/2fa-reset','POST',{});
-     if(d.ok){ say('usermsg',true,'✓ 已重置 '+uname+' 的 2FA'); setTimeout(()=>location.reload(),450);} else say('usermsg',false,d.error);
-   } else if(act==='tok'){
-     if(!confirm('为 '+uname+' 重新签发 MCP Token？旧 Token 将失效。')) return;
-     const d=await j('/api/admin/users/'+encodeURIComponent(uname)+'/token','POST',{});
-     if(d.ok) say('usermsg',true,'✓ 新 Token ('+uname+')：'+d.token); else say('usermsg',false,d.error);
-   } else if(act==='del'){
-     if(!confirm('删除用户 '+uname+'？其凭据数据将保留在磁盘但无法访问。')) return;
-     const d=await j('/api/admin/users/'+encodeURIComponent(uname),'DELETE');
-     if(d.ok){ say('usermsg',true,'✓ 已删除 '+uname); setTimeout(()=>location.reload(),450);} else say('usermsg',false,d.error);
-   }
- });
- const au=$('adduser'); if(au) au.onclick=async()=>{
-   const uname=$('newuser').value.trim(); if(!uname){ say('usermsg',false,'请输入用户名'); return; }
-   const d=await j('/api/admin/users','POST',{username:uname});
-   if(d.ok){ say('usermsg',true,'✓ 已添加 '+uname+'，初始 Token：'+d.token); $('newuser').value=''; setTimeout(()=>location.reload(),900); }
-   else say('usermsg',false,'失败：'+d.error);
- };
+// ---- user management (admin only; the whole block is absent for normal users) ----
+const um=$('usermsg');
+function adminOnly(){ return !!document.getElementById('adduser'); }
+document.querySelectorAll('button[data-act]').forEach(b=>b.onclick=async()=>{
+  const act=b.dataset.act, uname=b.dataset.user;
+  if(act==='rename'){
+    const nn=prompt('把用户 "'+uname+'" 重命名为：', uname); if(nn===null) return;
+    const nv=nn.trim();
+    if(!nv||nv===uname) return;
+    const d=await j('/api/admin/users/'+encodeURIComponent(uname),'PATCH',{new_username:nv});
+    if(d.ok){ say('usermsg',true,'✓ 已重命名为 '+d.username+(d.self?'（当前账号，正在重新登录…）':'')); setTimeout(()=>location.reload(),1200); }
+    else say('usermsg',false,'失败：'+d.error);
+  } else if(act==='pw'){
+    const np=prompt('为 '+uname+' 设置新密码（至少 6 位）：'); if(!np) return;
+    const d=await j('/api/admin/users/'+encodeURIComponent(uname)+'/password','POST',{password:np});
+    say('usermsg', d.ok, d.ok?('✓ 已更新 '+uname+' 的密码'):('失败：'+d.error));
+  } else if(act==='2fa'){
+    if(!confirm('重置 '+uname+' 的 2FA 绑定？')) return;
+    const d=await j('/api/admin/users/'+encodeURIComponent(uname)+'/2fa-reset','POST',{});
+    if(d.ok){ say('usermsg',true,'✓ 已重置 '+uname+' 的 2FA'); setTimeout(()=>location.reload(),450);} else say('usermsg',false,d.error);
+  } else if(act==='tok'){
+    if(!confirm('为 '+uname+' 重新签发 MCP Token？旧 Token 将失效。')) return;
+    const d=await j('/api/admin/users/'+encodeURIComponent(uname)+'/token','POST',{});
+    if(d.ok) say('usermsg',true,'✓ 新 Token ('+uname+')：'+d.token); else say('usermsg',false,d.error);
+  } else if(act==='del'){
+    if(!confirm('删除用户 '+uname+'？其凭据数据将保留在磁盘但无法访问。')) return;
+    const d=await j('/api/admin/users/'+encodeURIComponent(uname),'DELETE');
+    if(d.ok){ say('usermsg',true,'✓ 已删除 '+uname); setTimeout(()=>location.reload(),450);} else say('usermsg',false,d.error);
+  }
+});
+const au=$('adduser'); if(au) au.onclick=async()=>{
+  const uname=$('newuser').value.trim(); if(!uname){ say('usermsg',false,'请输入用户名'); return; }
+  const d=await j('/api/admin/users','POST',{username:uname});
+  if(d.ok){ say('usermsg',true,'✓ 已添加 '+uname+'，初始密码：'+(d.initial_password||'(自设)')+'，初始 Token：'+d.token); $('newuser').value=''; setTimeout(()=>location.reload(),1600); }
+  else say('usermsg',false,'失败：'+d.error);
+};
 
- // ---- ssh command generator ----
- // NOTE: every newline inside a JS string literal MUST be written as \\n here,
- // otherwise Python turns it into a real line break and the whole <script>
- // dies with "Invalid or unexpected token" (which kills ALL page handlers).
- $('sshgen').onclick=()=>{
-   const h=$('ssh_host').value.trim()||'myserver';
-   const u=$('ssh_user').value.trim()||'root';
-   const a=$('ssh_action').value;
-   const target=u+'@'+h;
-   const safe=h.replace(/[^a-zA-Z0-9_.-]/g,'_');
-   const kf='~/.ssh/id_ed25519_'+safe;
-   const NL='\\n';
-   const map={
-     'ssh-keygen':[
-       'ssh-keygen -t ed25519 -a 100 -C "'+u+'@'+h+'" -f '+kf,
-       'chmod 600 '+kf+' '+kf+'.pub',
-     ].join(NL),
-     'ssh-copy-id':'ssh-copy-id -i '+kf+'.pub '+target,
-     'ssh-connect':'ssh -v -p 22 '+target,
-     'ssh-config':[
-       "cat >> ~/.ssh/config <<'EOF'",
-       'Host '+h,
-       '    HostName '+h,
-       '    User '+u,
-       '    IdentityFile '+kf,
-       '    ServerAliveInterval 30',
-       'EOF',
-       'chmod 600 ~/.ssh/config',
-     ].join(NL),
-     'ssh-add':['ssh-add '+kf, 'ssh-add -l'].join(NL),
-     'ssh-useradd':'ssh '+target+' "sudo useradd -m -s /bin/bash NEWUSER && sudo passwd NEWUSER"',
-     'ssh-passwd':'ssh '+target+' "sudo passwd TARGETUSER"',
-     'ssh-authkeys':'ssh '+target+' "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys" < '+kf+'.pub',
-     'ssh-disable-pw':'ssh '+target+' "sudo sed -i \\"s/^#*PasswordAuthentication.*/PasswordAuthentication no/\\" /etc/ssh/sshd_config && sudo systemctl restart sshd"',
-   };
-   $('sshout').style.display='block';
-   $('sshout').textContent=map[a]||'';
-   say('sshmsg',true,'✓ 已生成，点击代码块复制');
- };
+// ---- web hardening (admin only) ----
+document.querySelectorAll('.toggle').forEach(t=>t.onclick=()=>{
+  t.classList.toggle('on');
+});
+const ss=$('secsave'); if(ss) ss.onclick=async()=>{
+  const body={
+    require_cloudflare_access: $('tg_cf').classList.contains('on'),
+    force_secure_cookie: $('tg_secure_cookie').classList.contains('on'),
+    required_edge_header: $('edge_hdr').value.trim(),
+    required_edge_header_value: $('edge_val').value.trim(),
+    login_max_failures: parseInt($('lmax').value||'0',10)||0,
+    login_lockout_seconds: parseInt($('lsec').value||'0',10)||0,
+  };
+  const d=await j('/api/admin/security','POST',body);
+  say('secmsg', d.ok, d.ok?'✓ 加固设置已保存':('失败：'+d.error));
+};
+const sr=$('secrefresh'); if(sr) sr.onclick=()=>location.reload();
 
- // ---- ops ----
- const rp=$('repair'); if(rp) rp.onclick=async()=>{
-   const d=await j('/api/admin/repair','POST',{});
-   say('opsmsg', d.ok, d.ok?('✓ '+d.message):('失败：'+d.error));
- };
+// ---- ops ----
+const rp=$('repair'); if(rp) rp.onclick=async()=>{
+  const d=await j('/api/admin/repair','POST',{});
+  say('opsmsg', d.ok, d.ok?('✓ '+d.message):('失败：'+d.error));
+};
 })();
 </script>
 </body></html>""", autoescape=True)
@@ -869,10 +895,38 @@ app.mount("/mcp", mcp_app)
 
 # --------------------------------------------------------------------------
 # Auth middleware: resolve the acting user into a contextvar for both the web
-# routes (session cookie) and the MCP endpoint (bearer token).
+# routes (session cookie) and the MCP endpoint (bearer token). Also enforces
+# the admin-managed web hardening rules (edge verification) before anything else.
 # --------------------------------------------------------------------------
+def _edge_gate(cfg: dict, request: Request) -> Response | None:
+    """Return a Response to short-circuit with when the edge check fails."""
+    sec = config.security_settings(cfg)
+    # The MCP endpoint authenticates with its own Bearer token and is called by
+    # machines, not browsers, so the browser-oriented edge gate does not apply.
+    if request.url.path.startswith("/mcp"):
+        return None
+    if sec.get("require_cloudflare_access"):
+        has_header = bool(request.headers.get("Cf-Access-Jwt-Assertion"))
+        has_cookie = bool(request.cookies.get("CF_Authorization"))
+        if not (has_header or has_cookie):
+            return JSONResponse(
+                {"ok": False, "error": "edge verification required (Cloudflare Access)"},
+                status_code=403)
+    hdr = (sec.get("required_edge_header") or "").strip()
+    if hdr:
+        expect = sec.get("required_edge_header_value") or ""
+        got = request.headers.get(hdr, "")
+        if not hmac.compare_digest(got, expect):
+            return JSONResponse(
+                {"ok": False, "error": "edge verification required"}, status_code=403)
+    return None
+
+
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
+    blocked = _edge_gate(app.state.cfg, request)
+    if blocked is not None:
+        return blocked
     user = None
     auth_hdr = request.headers.get("Authorization", "")
     if auth_hdr.startswith("Bearer "):
@@ -892,6 +946,19 @@ def require_user(request: Request) -> str:
     return user
 
 
+def require_admin(request: Request) -> str:
+    """Gate every user-management route: admin role only.
+
+    A normal user must not merely be denied the *action* — they must not be
+    able to enumerate other accounts at all, so this returns 404 rather than
+    403 to avoid confirming that the endpoint exists for them.
+    """
+    user = require_user(request)
+    if not config.is_admin(app.state.cfg, user):
+        raise HTTPException(status_code=404, detail="not found")
+    return user
+
+
 # --------------------------------------------------------------------------
 # Web routes
 # --------------------------------------------------------------------------
@@ -906,17 +973,63 @@ def login_page(error: str = ""):
     return _login_html(error)
 
 
+# In-process login throttle, keyed by client IP. Deliberately simple: the goal
+# is to blunt online password guessing, not to be a full WAF (use fail2ban /
+# Cloudflare rate limiting for that).
+_LOGIN_FAILS: dict[str, list[float]] = {}
+
+
+def _client_ip(request: Request) -> str:
+    fwd = request.headers.get("CF-Connecting-IP") or request.headers.get("X-Forwarded-For")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "?"
+
+
+def _throttled(ip: str, max_fails: int, window: int) -> int:
+    """Return seconds remaining in the lockout, or 0 when not locked out."""
+    if max_fails <= 0:
+        return 0
+    now = time.time()
+    fails = [t for t in _LOGIN_FAILS.get(ip, []) if now - t < window]
+    _LOGIN_FAILS[ip] = fails
+    if len(fails) >= max_fails:
+        return int(window - (now - fails[0])) + 1
+    return 0
+
+
+def _note_fail(ip: str) -> None:
+    _LOGIN_FAILS.setdefault(ip, []).append(time.time())
+
+
+def _clear_fails(ip: str) -> None:
+    _LOGIN_FAILS.pop(ip, None)
+
+
 @app.post("/login")
-def login(username: str = Form(...), password: str = Form(...), totp: str = Form("")):
+def login(request: Request, username: str = Form(...),
+          password: str = Form(...), totp: str = Form("")):
+    sec = config.security_settings(app.state.cfg)
+    ip = _client_ip(request)
+    wait = _throttled(ip, int(sec.get("login_max_failures") or 0),
+                      int(sec.get("login_lockout_seconds") or 300))
+    if wait:
+        return _login_html(f"尝试过于频繁，请 {wait} 秒后再试", 429)
+
     user_cfg = config.find_user(app.state.cfg, username)
     if not user_cfg or not auth.verify_password(password, user_cfg.get("password_hash", "")):
+        _note_fail(ip)
         return _login_html("用户名或密码错误", 401)
     state = config.load_user_state(username)
     if state.get("totp_confirmed"):
         if not auth.verify_totp(state.get("totp_secret", ""), totp):
+            _note_fail(ip)
             return _login_html("需要正确的 2FA 验证码", 401)
+
+    _clear_fails(ip)
     token = auth.issue_session(username)
-    secure = os.environ.get("VAULT_COOKIE_SECURE") == "1"
+    secure = (os.environ.get("VAULT_COOKIE_SECURE") == "1"
+              or bool(sec.get("force_secure_cookie")))
     resp = RedirectResponse("/", status_code=303)
     resp.set_cookie("session", token, httponly=True, samesite="lax", secure=secure)
     return resp
@@ -934,6 +1047,8 @@ def dashboard(request: Request):
     user = auth_user_ctx.get()
     if not user:
         return RedirectResponse("/login", status_code=303)
+    is_admin = config.is_admin(app.state.cfg, user)
+    role = config.user_role(app.state.cfg, user)
     state = config.load_user_state(user)
     secret = state.get("totp_secret")
     items = []
@@ -944,16 +1059,21 @@ def dashboard(request: Request):
     except Exception as e:
         items = [{"name": f"(list error: {e})", "note": "", "updated": "", "type": "generic"}]
 
+    # DATA ISOLATION: the user list is built ONLY for an admin. For a normal user
+    # `users` stays empty so their page cannot reveal that other accounts exist.
     users = []
-    for u in config.get_users(app.state.cfg):
-        uname = u.get("username")
-        st = config.load_user_state(uname)
-        totp = "enabled" if st.get("totp_confirmed") else ("pending" if st.get("totp_secret") else "off")
-        users.append({"username": uname, "has_token": bool(u.get("mcp_token")), "totp": totp})
+    if is_admin:
+        for u in config.get_users(app.state.cfg):
+            uname = u.get("username")
+            st = config.load_user_state(uname)
+            totp = "enabled" if st.get("totp_confirmed") else ("pending" if st.get("totp_secret") else "off")
+            users.append({"username": uname, "has_token": bool(u.get("mcp_token")),
+                          "totp": totp, "role": config.normalize_role(u.get("role"))})
 
     totp_uri = auth.totp_uri(secret, user) if secret else ""
     return DASH_TPL.render(
         user=user, items=items, mode=mode, type_labels=TYPE_LABELS, users=users,
+        is_admin=is_admin, role=role, sec=config.security_settings(app.state.cfg),
         totp_secret=secret or "", totp_confirmed=bool(state.get("totp_confirmed")),
         totp_uri=totp_uri, version=__version__,
         platform=f"{os.uname().sysname} {os.uname().machine}" if hasattr(os, "uname") else os.name,
@@ -1082,7 +1202,21 @@ async def api_password(request: Request):
 
 # --------------------------------------------------------------------------
 # Admin: user management (writes back to config.yaml)
+#
+# EVERY route here is gated by require_admin(), which returns 404 for a normal
+# user — that way an ordinary account cannot even probe for the user list.
 # --------------------------------------------------------------------------
+USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
+def _bad_username(name: str) -> str | None:
+    if not name:
+        return "用户名不能为空"
+    if not USERNAME_RE.match(name):
+        return "用户名只能包含字母、数字、下划线、点和连字符（最长 64 位，且以字母或数字开头）"
+    return None
+
+
 def _persist_or_error() -> JSONResponse | None:
     try:
         config.save_config(app.state.cfg)
@@ -1091,41 +1225,78 @@ def _persist_or_error() -> JSONResponse | None:
         return JSONResponse({"ok": False, "error": f"写入配置失败: {e}"}, status_code=500)
 
 
+def _user_row(u: dict) -> dict:
+    uname = u.get("username")
+    st = config.load_user_state(uname)
+    return {
+        "username": uname,
+        "has_token": bool(u.get("mcp_token")),
+        "role": config.normalize_role(u.get("role")),
+        "totp": "enabled" if st.get("totp_confirmed") else ("pending" if st.get("totp_secret") else "off"),
+    }
+
+
 @app.get("/api/admin/users")
 async def api_admin_users(request: Request):
-    require_user(request)
-    out = []
-    for u in config.get_users(app.state.cfg):
-        st = config.load_user_state(u.get("username"))
-        out.append({
-            "username": u.get("username"),
-            "has_token": bool(u.get("mcp_token")),
-            "totp": "enabled" if st.get("totp_confirmed") else ("pending" if st.get("totp_secret") else "off"),
-        })
-    return JSONResponse({"ok": True, "users": out})
+    require_admin(request)
+    return JSONResponse({"ok": True, "users": [_user_row(u) for u in config.get_users(app.state.cfg)]})
 
 
 @app.post("/api/admin/users")
 async def api_admin_add_user(request: Request):
-    require_user(request)
+    require_admin(request)
     data = await request.json()
     username = (data.get("username") or "").strip()
-    if not username:
-        return JSONResponse({"ok": False, "error": "用户名不能为空"}, status_code=400)
+    if (err := _bad_username(username)):
+        return JSONResponse({"ok": False, "error": err}, status_code=400)
     if config.find_user(app.state.cfg, username):
         return JSONResponse({"ok": False, "error": "用户已存在"}, status_code=400)
-    password = data.get("password") or auth.gen_token(9)  # random 18-char default
+    gen_password = not data.get("password")
+    password = data.get("password") or auth.gen_token(9)
     token = auth.gen_token(32)
-    config.add_or_update_user(app.state.cfg, username, auth.hash_password(password), token)
+    role = config.normalize_role(data.get("role"))
+    config.add_or_update_user(app.state.cfg, username, auth.hash_password(password), token, role)
     if (err := _persist_or_error()):
         return err
-    return JSONResponse({"ok": True, "username": username, "token": token,
-                         "initial_password": password if not data.get("password") else None})
+    return JSONResponse({"ok": True, "username": username, "token": token, "role": role,
+                         "initial_password": password if gen_password else None})
+
+
+@app.patch("/api/admin/users/{username}")
+async def api_admin_rename_user(request: Request, username: str):
+    """Rename a user, carrying their vault namespace and 2FA state along.
+
+    The admin may rename anyone (including itself). Because the session cookie
+    encodes the username, renaming yourself invalidates your own session — the
+    client is told via `self: true` so it can send the user back to /login.
+    """
+    me = require_admin(request)
+    data = await request.json()
+    new = (data.get("new_username") or "").strip()
+    if (err := _bad_username(new)):
+        return JSONResponse({"ok": False, "error": err}, status_code=400)
+    if not config.find_user(app.state.cfg, username):
+        return JSONResponse({"ok": False, "error": "用户不存在"}, status_code=404)
+    if new == username:
+        return JSONResponse({"ok": True, "username": new, "self": username == me})
+    if config.find_user(app.state.cfg, new):
+        return JSONResponse({"ok": False, "error": "目标用户名已存在"}, status_code=400)
+
+    try:
+        vault_core.rename_namespace(username, new)   # move the encrypted store
+    except FileExistsError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+    config.rename_user(app.state.cfg, username, new)
+    config.rename_user_state(username, new)
+    if (err := _persist_or_error()):
+        return err
+    return JSONResponse({"ok": True, "username": new, "self": username == me})
 
 
 @app.post("/api/admin/users/{username}/password")
 async def api_admin_set_password(request: Request, username: str):
-    require_user(request)
+    require_admin(request)
     data = await request.json()
     new = data.get("password") or ""
     if len(new) < 6:
@@ -1139,7 +1310,7 @@ async def api_admin_set_password(request: Request, username: str):
 
 @app.post("/api/admin/users/{username}/2fa-reset")
 async def api_admin_reset_2fa(request: Request, username: str):
-    require_user(request)
+    require_admin(request)
     if not config.find_user(app.state.cfg, username):
         return JSONResponse({"ok": False, "error": "用户不存在"}, status_code=404)
     config.save_user_state(username, {"totp_secret": None, "totp_confirmed": False})
@@ -1148,7 +1319,7 @@ async def api_admin_reset_2fa(request: Request, username: str):
 
 @app.post("/api/admin/users/{username}/token")
 async def api_admin_regen_token(request: Request, username: str):
-    require_user(request)
+    require_admin(request)
     token = auth.gen_token(32)
     if not config.set_user_token(app.state.cfg, username, token):
         return JSONResponse({"ok": False, "error": "用户不存在"}, status_code=404)
@@ -1159,15 +1330,52 @@ async def api_admin_regen_token(request: Request, username: str):
 
 @app.delete("/api/admin/users/{username}")
 async def api_admin_delete_user(request: Request, username: str):
-    me = require_user(request)
+    me = require_admin(request)
     if username == me:
         return JSONResponse({"ok": False, "error": "不能删除当前登录用户"}, status_code=400)
+    if not config.find_user(app.state.cfg, username):
+        return JSONResponse({"ok": False, "error": "用户不存在"}, status_code=404)
+    if (config.is_admin(app.state.cfg, username)
+            and config.admin_count(app.state.cfg) <= 1):
+        return JSONResponse({"ok": False, "error": "不能删除唯一的管理员"}, status_code=400)
     if not config.delete_user(app.state.cfg, username):
         return JSONResponse({"ok": False, "error": "用户不存在"}, status_code=404)
     config.clear_user_state(username)
     if (err := _persist_or_error()):
         return err
     return JSONResponse({"ok": True})
+
+
+@app.get("/api/admin/security")
+async def api_admin_get_security(request: Request):
+    require_admin(request)
+    return JSONResponse({"ok": True, "security": config.security_settings(app.state.cfg)})
+
+
+@app.post("/api/admin/security")
+async def api_admin_set_security(request: Request):
+    """Persist the web-hardening switches (admin only)."""
+    require_admin(request)
+    data = await request.json()
+    cur = config.security_settings(app.state.cfg)
+    patch = {}
+    for k in ("require_cloudflare_access", "force_secure_cookie"):
+        if k in data:
+            patch[k] = bool(data[k])
+    for k in ("required_edge_header", "required_edge_header_value"):
+        if k in data:
+            patch[k] = str(data[k] or "").strip()
+    for k in ("login_max_failures", "login_lockout_seconds"):
+        if k in data:
+            try:
+                patch[k] = max(0, int(data[k]))
+            except (TypeError, ValueError):
+                return JSONResponse({"ok": False, "error": f"{k} 必须是整数"}, status_code=400)
+    cur.update(patch)
+    app.state.cfg["security"] = cur
+    if (err := _persist_or_error()):
+        return err
+    return JSONResponse({"ok": True, "security": cur})
 
 
 @app.post("/api/admin/repair")
