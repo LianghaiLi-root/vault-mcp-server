@@ -40,6 +40,7 @@ from mcp.server.fastmcp import FastMCP
 
 from . import auth, vault_core
 from . import config
+from . import captcha
 from . import __version__
 
 auth_user_ctx = contextvars.ContextVar("auth_user", default=None)
@@ -239,8 +240,20 @@ LOGIN_TPL_SRC = """
    color:var(--err);border-radius:11px;padding:10px 13px;font-size:13px;margin-top:18px;
  }
  .alert.show{display:block}
- .foot{margin-top:20px;text-align:center;font-size:11.5px;color:var(--txt-mute)}
-</style></head><body>
+ /* human verification */
+ .cap{margin-top:14px}
+ .caprow{display:flex;gap:10px;align-items:stretch;margin-top:6px}
+ .caprow img,.caprow .capq{
+   flex:1;min-width:0;height:52px;border-radius:11px;object-fit:contain;display:block;
+   border:1px solid var(--stroke-soft);background:#f6f8fc;
+ }
+ .caprow .capq{
+   display:grid;place-items:center;font-size:19px;font-weight:700;
+   color:#20304a;letter-spacing:1.5px;
+ }
+ .caprow button{flex:0 0 52px;width:52px;padding:0;border-radius:11px;font-size:17px;line-height:1}
+ .capnote{font-size:11.5px;color:var(--txt-mute);margin-top:6px}
+</style>{% if captcha and captcha.mode == 'turnstile' %}<script>window.capCfError=function(c){var n=document.getElementById('capcfnote');if(!n)return;n.style.display='block';n.style.color='#ff8fa3';n.textContent='人机验证组件加载失败（错误码 '+c+'）。可能是 Site Key 配置有误，请联系管理员。';};window.capCfExpired=function(){var n=document.getElementById('capcfnote');if(!n)return;n.style.display='block';n.style.color='#ffd08a';n.textContent='人机验证已过期，请重新勾选后再登录。';};</script><script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>{% endif %}</head><body>
 <div class="wrap"><div class="glass box">
  <div class="brand">
    <div class="logo">🔐</div>
@@ -251,11 +264,53 @@ LOGIN_TPL_SRC = """
   <label>用户名</label><input name="username" type="text" autocomplete="username" required autofocus>
   <label>密码</label><input name="password" type="password" autocomplete="current-password" required>
   <label>2FA 验证码（已启用时必填）</label><input name="totp" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6 位数字" maxlength="6">
+  {% if captcha %}
+  <div class="cap">
+    <label>人机验证</label>
+     {% if captcha.mode == 'turnstile' %}
+      <div class="cf-turnstile" data-sitekey="{{ captcha.site_key }}" data-theme="light"
+           data-error-callback="capCfError" data-expired-callback="capCfExpired"></div>
+      <div class="capnote">由 Cloudflare Turnstile 自动完成验证。</div>
+      <div class="capnote" id="capcfnote" style="display:none"></div>
+     {% else %}
+      <div class="caprow">
+        {% if captcha.image %}<img id="capimg" src="{{ captcha['image'] }}" alt="人机验证图片">{% else %}<div id="capq" class="capq">{{ captcha.question }}</div>{% endif %}
+        <button type="button" id="capr" title="换一个">&#8635;</button>
+      </div>
+      <input name="captcha_answer" id="capans" type="text" autocomplete="off" required
+             placeholder="{% if captcha.mode == 'math' %}请计算结果{% else %}请输入上方内容（不区分大小写）{% endif %}">
+      <input type="hidden" name="captcha_id" id="capid" value="{{ captcha['id'] }}">
+    {% endif %}
+  </div>
+  {% endif %}
   <button type="submit">登 录</button>
  </form>
  <div class="alert {{ 'show' if error else '' }}">{{ error }}</div>
- <div class="foot">AES-256-GCM · scrypt · TOTP</div>
-</div></div></body></html>"""
+</div></div>
+<script>
+(function(){
+  var r=document.getElementById('capr');
+  if(!r) return;
+  var img=document.getElementById('capimg'), q=document.getElementById('capq'),
+      cid=document.getElementById('capid'), ans=document.getElementById('capans');
+  r.onclick=function(){
+    r.disabled=true;
+    fetch('/api/captcha/new',{cache:'no-store'})
+      .then(function(x){ return x.json(); })
+      .then(function(d){
+        if(!d || !d.ok) return;
+        if(cid) cid.value=d.id||'';
+        if(ans) ans.value='';
+        if(img && d.image){ img.src=d.image; img.style.display='block'; if(q) q.style.display='none'; }
+        else if(q && d.question){ q.textContent=d.question; q.style.display='grid'; if(img) img.style.display='none'; }
+        if(ans) ans.focus();
+      })
+      .catch(function(){})
+      .then(function(){ r.disabled=false; });
+  };
+})();
+</script>
+</body></html>"""
 
 LOGIN_TPL = Template(LOGIN_TPL_SRC, autoescape=True)
 
@@ -525,6 +580,48 @@ DASH_TPL_SRC = """
    <div class="msg" id="secmsg"></div>
   </div>
 
+  <div class="glass card">
+   <h2>🤖 人机验证</h2>
+   <div class="hint">登录页需先通过人机验证才能提交，用于阻挡自动化撞库脚本。仅管理员可修改。</div>
+
+   <div class="grid2">
+     <div>
+       <label>验证方式</label>
+       <select id="cap_mode">
+         <option value="off">关闭</option>
+         <option value="numeric">数字验证 —— 图片数字</option>
+         <option value="image">图形验证 —— 字母 + 数字</option>
+         <option value="turnstile">Cloudflare Turnstile —— 自动验证</option>
+       </select>
+     </div>
+     <div><label>验证码位数（3–8）</label><input type="text" id="cap_len" inputmode="numeric" value="{{ cap.length }}"></div>
+   </div>
+
+   <div id="cap_cf" style="display:none;margin-top:4px">
+     <div class="grid2">
+       <div><label>Turnstile Site Key</label><input type="text" id="cap_site" placeholder="0x4AAAAAAA..." autocomplete="off" value="{{ cap.turnstile_site_key }}"></div>
+       <div><label>Turnstile Secret Key</label><input type="password" id="cap_secret" placeholder="留空 = 不修改" autocomplete="new-password"></div>
+     </div>
+     <div class="hint" style="margin-top:10px">
+       在 Cloudflare 控制台 → Turnstile 创建站点后获得。<strong>Site Key 与 Secret Key 必须同时填写才能启用</strong>，
+       否则保存会被拒绝。Secret Key 不会回显，只显示是否已设置。
+       <span id="cap_state"></span>
+     </div>
+   </div>
+
+   <div id="cap_pilwarn" style="display:none;margin-top:10px" class="hint">
+     ⚠️ 服务器未安装 <code>Pillow</code>，数字 / 图形验证码将自动降级为「算术题」形式。
+     如需图片验证码请执行 <code>pip install Pillow</code>。
+   </div>
+
+   <div style="margin-top:16px" class="row">
+     <button id="capsave">保存人机验证设置</button>
+     <button class="mini" id="capreload">重新读取</button>
+     <button class="mini" id="capclearsec">清除 Secret</button>
+   </div>
+   <div class="msg" id="capmsg"></div>
+  </div>
+
   <div class="glass card danger-zone">
    <h2>🧹 维护操作</h2>
    <div class="hint">校验并整理<strong>当前登录用户</strong>的凭据存储。</div>
@@ -731,6 +828,50 @@ const ss=$('secsave'); if(ss) ss.onclick=async()=>{
   if(d.ok) wasCfOn=turningOn;
 };
 const sr=$('secrefresh'); if(sr) sr.onclick=()=>location.reload();
+
+// ---- human verification (admin only) ----
+const capModeSel=$('cap_mode'), capCfBox=$('cap_cf');
+function capSync(){
+  if(capCfBox) capCfBox.style.display=(capModeSel && capModeSel.value==='turnstile')?'block':'none';
+}
+function capRender(d){
+  if(!d) return;
+  const c=d.captcha||{};
+  if(capModeSel) capModeSel.value=c.mode||'off';
+  if($('cap_len')) $('cap_len').value=(c.length||4);
+  if($('cap_site')) $('cap_site').value=(c.turnstile_site_key||'');
+  if($('cap_state')) $('cap_state').textContent=c.turnstile_secret_set?'（Secret 已设置）':'（尚未设置 Secret）';
+  if($('cap_pilwarn')) $('cap_pilwarn').style.display=d.pillow?'none':'block';
+  capSync();
+}
+async function capLoad(){ capRender(await j('/api/admin/captcha')); }
+if(capModeSel){ capModeSel.onchange=capSync; capLoad(); }
+const caps=$('capsave');
+if(caps) caps.onclick=async()=>{
+  const body={
+    mode:capModeSel.value,
+    length:parseInt($('cap_len').value||'4',10)||4,
+    turnstile_site_key:$('cap_site')?$('cap_site').value.trim():'',
+  };
+  if($('cap_secret')) body.turnstile_secret_key=$('cap_secret').value.trim();
+  const d=await j('/api/admin/captcha','POST',body);
+  say('capmsg', d.ok, d.ok?'✓ 人机验证设置已保存':('失败：'+d.error));
+  if(d.ok){ if($('cap_secret')) $('cap_secret').value=''; capRender(d); }
+};
+const capRel=$('capreload');
+if(capRel) capRel.onclick=async()=>{ await capLoad(); say('capmsg',true,'✓ 已重新读取'); };
+const capClr=$('capclearsec');
+if(capClr) capClr.onclick=async()=>{
+  if(!confirm('确定清除已保存的 Turnstile Secret Key 吗？清除后将无法启用自动验证。')) return;
+  const d=await j('/api/admin/captcha','POST',{
+    mode:capModeSel.value,
+    length:parseInt($('cap_len').value||'4',10)||4,
+    turnstile_site_key:$('cap_site')?$('cap_site').value.trim():'',
+    clear_secret:true,
+  });
+  say('capmsg', d.ok, d.ok?'✓ Secret 已清除':('失败：'+d.error));
+  if(d.ok) capRender(d);
+};
 
 // ---- ops ----
 const rp=$('repair'); if(rp) rp.onclick=async()=>{
@@ -1054,10 +1195,44 @@ def require_admin(request: Request) -> str:
 # --------------------------------------------------------------------------
 # Web routes
 # --------------------------------------------------------------------------
+def _issue_captcha_for_page() -> dict | None:
+    """Build a fresh challenge for a rendered login page (None when disabled)."""
+    sec = config.captcha_settings(app.state.cfg)
+    mode = str(sec.get("mode") or "off")
+    if mode == "off":
+        return None
+    if mode == "turnstile":
+        site = str(sec.get("turnstile_site_key") or "").strip()
+        # A half-configured automatic challenge must not degrade into no
+        # challenge: fall back to a rendered one instead of silently passing.
+        if site:
+            return {"mode": "turnstile", "site_key": site}
+        ch = captcha.issue("image", int(sec.get("length") or 4))
+        return ch if ch.get("ok") else None
+    ch = captcha.issue(mode, int(sec.get("length") or 4))
+    return ch if ch.get("ok") else None
+
+
 def _login_html(error: str = "", status_code: int = 200) -> HTMLResponse:
     """Always render the login page as text/html — returning a bare string makes
     FastAPI emit application/json, which the browser shows as escaped garbage."""
-    return HTMLResponse(LOGIN_TPL.render(error=error), status_code=status_code)
+    return HTMLResponse(
+        LOGIN_TPL.render(error=error, captcha=_issue_captcha_for_page()),
+        status_code=status_code)
+
+
+@app.get("/api/captcha/new")
+def api_captcha_new():
+    """Issue a new challenge. Unauthenticated by design — the login page needs it."""
+    sec = config.captcha_settings(app.state.cfg)
+    mode = str(sec.get("mode") or "off")
+    if mode == "off":
+        return JSONResponse({"ok": False, "error": "人机验证未启用"}, status_code=404)
+    if mode == "turnstile":
+        return JSONResponse({"ok": False, "error": "Turnstile 由浏览器自动刷新"},
+                            status_code=400)
+    ch = captcha.issue(mode, int(sec.get("length") or 4))
+    return JSONResponse(ch, status_code=200 if ch.get("ok") else 500)
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -1100,13 +1275,31 @@ def _clear_fails(ip: str) -> None:
 
 @app.post("/login")
 def login(request: Request, username: str = Form(...),
-          password: str = Form(...), totp: str = Form("")):
+          password: str = Form(...), totp: str = Form(""),
+          captcha_id: str = Form(""), captcha_answer: str = Form(""),
+          cf_turnstile: str = Form("", alias="cf-turnstile-response")):
     sec = config.security_settings(app.state.cfg)
     ip = _client_ip(request)
     wait = _throttled(ip, int(sec.get("login_max_failures") or 0),
                       int(sec.get("login_lockout_seconds") or 300))
     if wait:
         return _login_html(f"尝试过于频繁，请 {wait} 秒后再试", 429)
+
+    # Human verification runs BEFORE the password check so an automated guessing
+    # loop never reaches the credential comparison. Failures count toward the
+    # throttle, otherwise the captcha would not actually blunt brute force.
+    cap = config.captcha_settings(app.state.cfg)
+    cap_mode = str(cap.get("mode") or "off")
+    if cap_mode == "turnstile":
+        ok, why = captcha.verify_turnstile(
+            str(cap.get("turnstile_secret_key") or ""), cf_turnstile, ip)
+        if not ok:
+            _note_fail(ip)
+            return _login_html(f"人机验证未通过：{why}", 401)
+    elif cap_mode in ("numeric", "image"):
+        if not captcha.consume(captcha_id, captcha_answer):
+            _note_fail(ip)
+            return _login_html("人机验证未通过，请重新输入", 401)
 
     user_cfg = config.find_user(app.state.cfg, username)
     if not user_cfg or not auth.verify_password(password, user_cfg.get("password_hash", "")):
@@ -1168,6 +1361,8 @@ def dashboard(request: Request):
         is_admin=is_admin, role=role, sec=config.security_settings(app.state.cfg),
         totp_secret=secret or "", totp_confirmed=bool(state.get("totp_confirmed")),
         totp_uri=totp_uri, version=__version__,
+        cap=config.captcha_settings(app.state.cfg),
+        cap_pillow=captcha.pillow_available(),
         platform=f"{os.uname().sysname} {os.uname().machine}" if hasattr(os, "uname") else os.name,
     )
 
@@ -1468,6 +1663,53 @@ async def api_admin_set_security(request: Request):
     if (err := _persist_or_error()):
         return err
     return JSONResponse({"ok": True, "security": cur})
+
+
+@app.get("/api/admin/captcha")
+async def api_admin_get_captcha(request: Request):
+    require_admin(request)
+    c = config.captcha_settings(app.state.cfg)
+    return JSONResponse({
+        "ok": True,
+        "captcha": {
+            "mode": c["mode"],
+            "length": c["length"],
+            "turnstile_site_key": c["turnstile_site_key"],
+            # The secret is never echoed back to a browser. Report only whether
+            # one is stored; send a new value to replace it.
+            "turnstile_secret_set": bool(c["turnstile_secret_key"]),
+        },
+        "pillow": captcha.pillow_available(),
+    })
+
+
+@app.post("/api/admin/captcha")
+async def api_admin_set_captcha(request: Request):
+    """Persist the human-verification settings (admin only)."""
+    require_admin(request)
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    current = config.captcha_settings(app.state.cfg)
+    settings, err = config.validate_captcha(data, current)
+    if err:
+        return JSONResponse({"ok": False, "error": err}, status_code=400)
+    app.state.cfg["captcha"] = settings
+    if (e := _persist_or_error()):
+        return e
+    return JSONResponse({
+        "ok": True,
+        "captcha": {
+            "mode": settings["mode"],
+            "length": settings["length"],
+            "turnstile_site_key": settings["turnstile_site_key"],
+            "turnstile_secret_set": bool(settings["turnstile_secret_key"]),
+        },
+        "pillow": captcha.pillow_available(),
+    })
 
 
 @app.post("/api/admin/repair")
