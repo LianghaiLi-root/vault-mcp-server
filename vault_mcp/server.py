@@ -1160,6 +1160,17 @@ def _edge_gate(cfg: dict, request: Request) -> Response | None:
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
+    # The MCP app is mounted at /mcp/, but clients routinely configure the URL
+    # without the trailing slash. Starlette would then answer 307 to /mcp/, and
+    # following that redirect makes HTTP clients DROP the Authorization header —
+    # the request still arrives, so the handshake and tools/list look fine, but
+    # every tool call sees no user and returns "unauthorized" even though the
+    # token is perfectly valid. Rewrite the path internally instead of
+    # redirecting: same handler, no 307, and the credential survives.
+    if request.scope.get("path") == "/mcp":
+        request.scope["path"] = "/mcp/"
+        request.scope["raw_path"] = b"/mcp/"
+
     blocked = _edge_gate(app.state.cfg, request)
     if blocked is not None:
         return blocked
