@@ -69,7 +69,7 @@ def save_config(cfg: dict, path: str | None = None) -> None:
 
 
 def add_or_update_user(cfg: dict, username: str, password_hash: str,
-                       mcp_token: str | None = None) -> dict:
+                       mcp_token: str | None = None, role: str | None = None) -> dict:
     """Insert or replace a user record in-place; returns the record."""
     users = cfg.setdefault("users", [])
     for u in users:
@@ -77,11 +77,86 @@ def add_or_update_user(cfg: dict, username: str, password_hash: str,
             u["password_hash"] = password_hash
             if mcp_token:
                 u["mcp_token"] = mcp_token
+            if role:
+                u["role"] = normalize_role(role)
             return u
     rec = {"username": username, "password_hash": password_hash,
-           "mcp_token": mcp_token or "", "totp_secret": None}
+           "mcp_token": mcp_token or "", "role": normalize_role(role),
+           "totp_secret": None}
     users.append(rec)
     return rec
+
+
+def rename_user(cfg: dict, old: str, new: str) -> bool:
+    """Change a user's username in-place. Returns False if `old` is unknown."""
+    for u in get_users(cfg):
+        if u.get("username") == old:
+            u["username"] = new
+            return True
+    return False
+
+
+# --------------------------------------------------------------------------
+# Roles
+# --------------------------------------------------------------------------
+# `admin`  — the single super-user: may rename itself, add/rename/delete other
+#            users, and see the whole user list.
+# `user`   — an ordinary account: may only manage itself. It must NEVER learn
+#            that other users exist, so anything user-scoped is filtered by the
+#            caller's own namespace and the user list is never rendered.
+ROLE_ADMIN = "admin"
+ROLE_USER = "user"
+
+
+def normalize_role(role: str | None) -> str:
+    return ROLE_ADMIN if str(role or "").strip().lower() == ROLE_ADMIN else ROLE_USER
+
+
+def user_role(cfg: dict, username: str) -> str:
+    u = find_user(cfg, username)
+    return normalize_role(u.get("role") if u else None)
+
+
+def is_admin(cfg: dict, username: str) -> bool:
+    return user_role(cfg, username) == ROLE_ADMIN
+
+
+def admin_count(cfg: dict) -> int:
+    return sum(1 for u in get_users(cfg) if normalize_role(u.get("role")) == ROLE_ADMIN)
+
+
+def set_user_role(cfg: dict, username: str, role: str) -> bool:
+    for u in get_users(cfg):
+        if u.get("username") == username:
+            u["role"] = normalize_role(role)
+            return True
+    return False
+
+
+# --------------------------------------------------------------------------
+# Web hardening (admin-managed, persisted in config.yaml under `security`)
+# --------------------------------------------------------------------------
+DEFAULT_SECURITY = {
+    # Reject HTTP requests that did not pass through a Cloudflare Access policy.
+    # When on, every request must carry the Cloudflare Access JWT header (or the
+    # CF_Authorization cookie) — i.e. the edge already authenticated the visitor.
+    "require_cloudflare_access": False,
+    # User-defined extra header the edge must inject (e.g. a shared secret set by
+    # an nginx `add_header X-Edge-Secret ...` rule). Empty = not enforced.
+    "required_edge_header": "",
+    "required_edge_header_value": "",
+    # Force the session cookie to be Secure (only meaningful behind HTTPS).
+    "force_secure_cookie": False,
+    # Simple in-process login throttle.
+    "login_max_failures": 8,
+    "login_lockout_seconds": 300,
+}
+
+
+def security_settings(cfg: dict) -> dict:
+    s = dict(DEFAULT_SECURITY)
+    s.update(cfg.get("security", {}) or {})
+    return s
 
 
 def set_password_hash(cfg: dict, username: str, password_hash: str) -> bool:
@@ -176,4 +251,18 @@ def clear_user_state(username: str) -> None:
         return
     if username in data:
         del data[username]
+        p.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def rename_user_state(old: str, new: str) -> None:
+    """Move a user's runtime state (2FA secret etc.) to the new username."""
+    p = _users_state_path()
+    if not p.exists():
+        return
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if old in data:
+        data[new] = data.pop(old)
         p.write_text(json.dumps(data, indent=2), encoding="utf-8")
