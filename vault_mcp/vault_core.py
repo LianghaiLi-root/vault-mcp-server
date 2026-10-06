@@ -170,6 +170,28 @@ def vault_mode(namespace: str | None = None) -> str:
     return open_vault(namespace)["meta"]["mode"]
 
 
+def rename_namespace(old: str, new: str) -> bool:
+    """Rename a user's vault directory so credentials follow the account.
+
+    The data-encryption key is wrapped inside that directory, so moving the
+    whole tree preserves it — no re-encryption needed. Returns False when the
+    source has no on-disk vault yet (nothing to move).
+    """
+    if not old or not new or old == new:
+        return False
+    src = VAULT_DIR / old
+    dst = VAULT_DIR / new
+    if not src.exists():
+        return src.exists() and False
+    if dst.exists():
+        raise FileExistsError(f"目标命名空间已存在: {new}")
+    # Drop any cached handle so later reads reopen from the new path.
+    _VAULTS.pop(old, None)
+    _VAULTS.pop(new, None)
+    src.rename(dst)
+    return True
+
+
 def _slug(name: str) -> str:
     return hashlib.sha256(name.encode("utf-8")).hexdigest()[:32]
 
