@@ -215,7 +215,7 @@ pre{background:rgba(9,12,18,.68);border:1px solid var(--stroke-soft);padding:12p
 .empty{padding:26px;text-align:center;color:var(--txt-mute);font-size:14px}
 """
 
-LOGIN_TPL = Template("""
+LOGIN_TPL_SRC = """
 <!doctype html><html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>凭据库 · 登录</title>
@@ -255,10 +255,12 @@ LOGIN_TPL = Template("""
  </form>
  <div class="alert {{ 'show' if error else '' }}">{{ error }}</div>
  <div class="foot">AES-256-GCM · scrypt · TOTP</div>
-</div></div></body></html>""", autoescape=True)
+</div></div></body></html>"""
+
+LOGIN_TPL = Template(LOGIN_TPL_SRC, autoescape=True)
 
 
-DASH_TPL = Template("""
+DASH_TPL_SRC = """
 <!doctype html><html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>凭据库 · {{ user }}</title>
@@ -704,7 +706,16 @@ document.querySelectorAll('.toggle').forEach(t=>t.onclick=()=>{
 const ss=$('secsave'); if(ss) ss.onclick=async()=>{
   const turningOn=$('tg_cf').classList.contains('on');
   if(turningOn && !wasCfOn){
-    const ok=confirm('即将启用边缘访问校验。\n\n启用后，只有携带 Cloudflare Access 凭证的浏览器才能打开登录页；\n请在 Cloudflare 侧确认 Access 应用已覆盖本站，否则所有人都将无法登录。\n\n仍要以 MCP Bearer Token 调用 API 的方式随时关闭本开关。\n\n确定启用？');
+    // NOTE: build the message with a real escaped-newline constant. Writing a
+    // raw escape sequence of backslash-n inside this (non-raw) triple-quoted
+    // Python template gets compiled into an actual newline, which splits the JS
+    // string literal and kills the whole script block. Avoid the sequence here
+    // too, comments included — it is escaped before JS ever sees it.
+    const ok=confirm(['即将启用边缘访问校验。','',
+      '启用后，只有携带 Cloudflare Access 凭证的浏览器才能打开登录页；',
+      '请在 Cloudflare 侧确认 Access 应用已覆盖本站，否则所有人都将无法登录。','',
+      '仍可以用 MCP Bearer Token 调用 API 的方式随时关闭本开关。','',
+      '确定启用？'].join(NL));
     if(!ok) return;
   }
   const body={
@@ -728,7 +739,9 @@ const rp=$('repair'); if(rp) rp.onclick=async()=>{
 };
 })();
 </script>
-</body></html>""", autoescape=True)
+</body></html>"""
+
+DASH_TPL = Template(DASH_TPL_SRC, autoescape=True)
 
 
 # --------------------------------------------------------------------------
@@ -898,6 +911,70 @@ async def _lifespan(app_: FastAPI):
 app = FastAPI(title="Vault MCP Server", lifespan=_lifespan)
 app.state.cfg = cfg
 app.mount("/mcp", mcp_app)
+
+
+# --------------------------------------------------------------------------
+# Template self-check.
+#
+# These templates are plain (non-raw) Python triple-quoted strings that embed
+# JavaScript. A literal \n written inside one of them is compiled by Python into
+# a REAL newline, which splits the JS string literal and makes the whole
+# <script> block fail with "SyntaxError: Invalid or unexpected token" — silently
+# killing every event handler on the page (tabs stop switching, the type
+# dropdown looks empty). This has regressed twice, so guard it at import time:
+# any such mistake now fails loudly at boot instead of shipping.
+# --------------------------------------------------------------------------
+def _selfcheck_templates() -> None:
+    """Guard against the 'literal backslash-n in a non-raw template' regression.
+
+    By the time Python has compiled the module the damage is already done: a raw
+    ``\\n`` written inside DASH_TPL/LOGIN_TPL becomes a REAL newline in the string
+    object, so scanning the live constant can never detect it. The only place the
+    mistake is still visible is the raw .py source, so read the file and check the
+    template region there.
+    """
+    import re as _re
+    import pathlib
+
+    problems: list[str] = []
+    try:
+        raw = pathlib.Path(__file__).read_text(encoding="utf-8")
+    except Exception as e:  # never let the guard itself break startup
+        print(f"[selfcheck] skipped (cannot read source: {e})")
+        return
+
+    for name in ("DASH_TPL_SRC", "LOGIN_TPL_SRC"):
+        i = raw.find(f"{name} = ")
+        if i < 0:
+            continue
+        # scan until the next top-level assignment or the self-check itself
+        j = raw.find("\nLOGIN_TPL = ", i + 1)
+        for stop in (raw.find("\nDASH_TPL = ", i + 1),
+                     raw.find("\n# ------", i + 1),
+                     len(raw)):
+            if 0 < stop < (j if j > 0 else len(raw)):
+                j = stop
+        if j < 0:
+            j = len(raw)
+        region = raw[i:j]
+        # Only look inside the <script> … </script> span.
+        for m in _re.finditer(r"<script>(.*?)</script>", region, _re.S):
+            body = m.group(1)
+            for hit in _re.finditer(r"(?<!\\)\\n", body):
+                line = raw[:i + m.start(1) + hit.start()].count("\n") + 1
+                ctx = body[max(0, hit.start() - 45):hit.end() + 45].replace("\n", "⏎")
+                problems.append(f"{name}: raw \\n at server.py:{line}: ...{ctx}...")
+
+    if problems:
+        raise RuntimeError(
+            "Template self-check FAILED — the dashboard script would not run:\n  "
+            + "\n  ".join(problems)
+            + "\n\nFix: write \\\\n, or join an array with a '\\n' constant. Watch out "
+              "for the sequence in COMMENTS inside the template too."
+        )
+
+
+_selfcheck_templates()
 
 
 # --------------------------------------------------------------------------
