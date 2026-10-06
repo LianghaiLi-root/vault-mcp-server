@@ -13,7 +13,6 @@ dist/
 .vault-data/
 vault-data/
 /users_state.json
-/users_state.json
 *.vault/
 
 # Real config with real hashes/tokens — keep the example only
