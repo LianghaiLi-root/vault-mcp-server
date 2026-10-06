@@ -32,7 +32,7 @@ def _save_raw(path, data):
         yaml.safe_dump(data, f, sort_keys=False, allow_unicode=True)
 
 
-def add_user(path, username):
+def add_user(path, username, role=cfgmod.ROLE_USER):
     data = _load_raw(path)
     users = data.setdefault("users", [])
     pw = getpass.getpass(f"Password for '{username}': ")
@@ -43,12 +43,13 @@ def add_user(path, username):
         "username": username,
         "password_hash": auth.hash_password(pw),
         "mcp_token": auth.gen_token(32),
+        "role": cfgmod.normalize_role(role),
         "totp_secret": None,
     }
     users[:] = [u for u in users if u.get("username") != username]
     users.append(rec)
     _save_raw(path, data)
-    print(f"Added user '{username}'. mcp_token: {rec['mcp_token']}")
+    print(f"Added user '{username}' (role={rec['role']}). mcp_token: {rec['mcp_token']}")
 
 
 def set_token(path, username):
@@ -75,7 +76,19 @@ def list_users(path):
         uname = u.get("username")
         st = state.get(uname, {})
         totp = "enabled" if st.get("totp_confirmed") else ("pending" if st.get("totp_secret") else "off")
-        print(f"  - {uname:20s} mcp_token={'set' if u.get('mcp_token') else 'MISSING':7s} 2FA={totp}")
+        role = cfgmod.normalize_role(u.get("role"))
+        print(f"  - {uname:20s} role={role:6s} mcp_token={'set' if u.get('mcp_token') else 'MISSING':7s} 2FA={totp}")
+
+
+def set_role(path, username, role):
+    data = _load_raw(path)
+    for u in data.get("users", []):
+        if u.get("username") == username:
+            u["role"] = cfgmod.normalize_role(role)
+            _save_raw(path, data)
+            print(f"'{username}' is now role={u['role']}")
+            return
+    print(f"User '{username}' not found."); sys.exit(1)
 
 
 def main():
@@ -83,14 +96,19 @@ def main():
     p.add_argument("--config", default=os.environ.get("VAULT_CONFIG", "config.yaml"))
     sub = p.add_subparsers(dest="cmd", required=True)
     a = sub.add_parser("add-user"); a.add_argument("username")
+    a.add_argument("--role", default=cfgmod.ROLE_USER, choices=[cfgmod.ROLE_ADMIN, cfgmod.ROLE_USER])
     t = sub.add_parser("set-token"); t.add_argument("username")
+    r = sub.add_parser("set-role"); r.add_argument("username")
+    r.add_argument("role", choices=[cfgmod.ROLE_ADMIN, cfgmod.ROLE_USER])
     sub.add_parser("list-users")
     args = p.parse_args()
 
     if args.cmd == "add-user":
-        add_user(args.config, args.username)
+        add_user(args.config, args.username, args.role)
     elif args.cmd == "set-token":
         set_token(args.config, args.username)
+    elif args.cmd == "set-role":
+        set_role(args.config, args.username, args.role)
     elif args.cmd == "list-users":
         list_users(args.config)
 
