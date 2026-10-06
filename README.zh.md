@@ -13,13 +13,31 @@
 
 ## 功能特性
 
-**Web 控制台**（毛玻璃风格，三个标签页）
+**角色模型（重要）**
 
-| 标签页 | 能力 |
-|--------|------|
-| **凭据管理** | 新增 / 修改 / 删除带类型的凭据（SSH / 网站 / API / 数据库 / 通用）。表单会按所选类型自动渲染对应字段。 |
-| **安全设置** | 启用 / 重置 TOTP 双因素、查看与重新生成 MCP Token、修改登录密码。 |
-| **运维 / 用户** | 服务器状态；**用户管理**（新增用户、重置密码、重置 2FA、重签 MCP Token、删除用户，直接写回 `config.yaml`）；**SSH 快捷运维**命令生成器（生成密钥对、推送公钥、连接测试、写别名、加入 agent、远端新增用户 / 改密码 / 部署 authorized_keys / 加固 SSH）；凭据存储完整性校验。 |
+| 角色 | 权限 |
+|------|------|
+| `admin` | 超级用户。可自定义用户名、新增 / 重命名 / 删除任意用户、重置他人密码与 2FA、重签 Token，并查看完整用户列表与全局加固开关。 |
+| `user` | 普通账号。**只能管理自己**。看不到用户列表、看不到「运维 / 用户」标签页，访问任何 `/api/admin/*` 均返回 **404**（而不是 403，避免暴露这些接口的存在）。 |
+
+配置里未写 `role` 的账号按 `user` 处理。请务必至少保留一个 `admin`（最后一个管理员无法被删除）。
+
+**Web 控制台**（毛玻璃风格，标签页按角色显示）
+
+| 标签页 | 可见性 | 能力 |
+|--------|--------|------|
+| **凭据管理** | 所有人 | 新增 / 修改 / 删除带类型的凭据（SSH / 网站 / API / 数据库 / 通用）。表单会按所选类型自动渲染对应字段。 |
+| **安全设置** | 所有人 | 启用 / 重置 TOTP 双因素、查看与重新生成 MCP Token、修改登录密码。 |
+| **运维 / 用户** | 仅 `admin` | 服务器状态；**用户管理**（新增用户、**修改用户名**、重置密码、重置 2FA、重签 MCP Token、删除用户，直接写回 `config.yaml`）；**Web 访问加固**；凭据存储完整性校验。 |
+
+**Web 访问加固**（仅 `admin` 可改，写入 `config.yaml` 的 `security` 段）
+
+- **Cloudflare Access 前置校验** —— 开启后，所有浏览器请求必须带 Cloudflare Access 的 JWT（`Cf-Access-Jwt-Assertion` 头或 `CF_Authorization` Cookie），否则直接 **403**，连登录页都不渲染。适合配合 Cloudflare Zero Trust 做一层“登录前”的访问控制。
+- **强制 HTTPS Cookie** —— 给会话 Cookie 加 `Secure` 标记。
+- **自定义边缘校验头** —— 自建 nginx / 其他 CDN 注入的共享密钥（如 `add_header X-Edge-Secret "xxx";`），不匹配即 403。
+- **登录失败限流** —— 同一来源连续失败 N 次后锁定 M 秒（返回 429）。
+
+> `/mcp` 不经过上述边缘校验：它用独立的 Bearer Token 鉴权，面向机器而非浏览器。
 
 **MCP 工具：** `vault_save`、`vault_get`、`vault_list`、`vault_delete`，以及
 `vault_http`（AI 盲调 HTTP —— 秘密由服务端注入，永不返回给模型）。
@@ -30,7 +48,7 @@
 |------|------|
 | `vault_mcp/vault_core.py` | 加密 + 多用户加密存储（标准库 + `cryptography`） |
 | `vault_mcp/auth.py` | scrypt 密码哈希、TOTP（RFC 6238）、HMAC 会话令牌 |
-| `vault_mcp/config.py` | 加载 `config.yaml`、用户查找、2FA 状态持久化 |
+| `vault_mcp/config.py` | 加载 `config.yaml`、用户查找、**角色判定**、Web 加固设置、2FA 状态持久化 |
 | `vault_mcp/server.py` | FastAPI 应用：Web 控制台 + 远程 MCP（`/mcp`） |
 | `vault_mcp/stdio.py` | 本地 **stdio** MCP 服务（本机上的智能体使用） |
 | `vault_mcp/cli.py` | 运维 CLI，用于预置用户 / 令牌 |
@@ -53,7 +71,9 @@ export VAULT_FORCE_PBKDF2=1
 export VAULT_DIR=/var/lib/vault-mcp/vault
 
 # 2. 预置一个用户（向 config.yaml 写入 scrypt 哈希 + mcp_token）
-python -m vault_mcp.cli add-user admin
+python -m vault_mcp.cli add-user admin --role admin
+#    后续账号默认是普通用户：
+# python -m vault_mcp.cli add-user alice
 
 # 3. 运行（生产环境请置于 TLS / 反向代理之后）
 VAULT_COOKIE_SECURE=1 uvicorn vault_mcp.server:app --host 0.0.0.0 --port 8080
@@ -66,7 +86,7 @@ VAULT_COOKIE_SECURE=1 uvicorn vault_mcp.server:app --host 0.0.0.0 --port 8080
 
 ```bash
 echo "VAULT_MASTER_PASSWORD=$(openssl rand -hex 32)" > .env
-python -m vault_mcp.cli add-user admin          # 生成 config.yaml + token
+python -m vault_mcp.cli add-user admin --role admin   # 生成 config.yaml + token
 docker compose up --build
 ```
 
@@ -133,7 +153,7 @@ cd /opt/vault-mcp-server && python -m venv .venv && .venv/bin/pip install -r req
 
 # 2. 预置配置 + 密钥
 cp config.example.yaml config.yaml
-.venv/bin/python -m vault_mcp.cli add-user admin
+.venv/bin/python -m vault_mcp.cli add-user admin --role admin
 cp deploy/env.example .env
 #   编辑 .env：设置 VAULT_MASTER_PASSWORD（openssl rand -hex 32）并执行 chmod 600 .env
 
