@@ -1,0 +1,9 @@
+# Core crypto + web + MCP transport
+cryptography>=42
+fastapi
+uvicorn[standard]
+python-multipart
+jinja2
+pyyaml
+mcp==1.30.0
+sse-starlette

@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Runtime secrets / vault data — never commit
+.vault-data/
+vault-data/
+/users_state.json
+/users_state.json
+*.vault/
+
+# Real config with real hashes/tokens — keep the example only
+config.yaml
+.env
+.env.*
+!.env.example
+
+# Local test artifacts
+_webtest*/

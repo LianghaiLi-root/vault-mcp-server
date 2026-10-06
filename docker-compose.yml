@@ -1,0 +1,16 @@
+services:
+  vault-mcp:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      # Set VAULT_MASTER_PASSWORD via a .env file or your secret manager.
+      VAULT_MASTER_PASSWORD: ${VAULT_MASTER_PASSWORD}
+      VAULT_COOKIE_SECURE: "1"   # set 1 only behind TLS (reverse proxy / CF)
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - vault-data:/data
+    restart: unless-stopped
+
+volumes:
+  vault-data:

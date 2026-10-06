@@ -1,0 +1,20 @@
+# Vault MCP Server — example configuration
+# Operator edits this file to provision users. 2FA is enrolled later via the web UI.
+# Do NOT commit real password hashes / tokens; generate them on the server with
+#   python vault_cli.py add-user <username>
+
+vault:
+  dir: /var/lib/vault-mcp/vault   # encrypted store root (mount a volume here)
+  force_pbkdf2: true             # REQUIRED on Linux — no DPAPI available
+
+server:
+  host: 0.0.0.0
+  port: 8080
+
+users:
+  - username: admin
+    # Generate with: python vault_cli.py add-user admin
+    password_hash: "REPLACE_WITH_scrypt_hash"
+    # Generate with: python vault_cli.py set-token admin
+    mcp_token: "REPLACE_WITH_long_random_token"
+    totp_secret: null            # set automatically after 2FA enrollment
