@@ -378,7 +378,7 @@ DASH_TPL_SRC = """
     <div class="logo">🔐</div>
     <div>
       <h1>凭据库</h1>
-      <div class="who"><code>{{ user }}</code> · <span class="rolebadge {{ role }}">{{ '管理员' if is_admin else '普通用户' }}</span> · 模式 <code>{{ mode }}</code></div>
+      <div class="who"><code>{{ user }}</code> · <span class="rolebadge {{ role }}">{{ '管理员' if is_admin else '普通用户' }}</span></div>
     </div>
   </div>
   <div class="row">
@@ -706,9 +706,12 @@ DASH_TPL_SRC = """
  });
  document.querySelectorAll('button.mini[data-name]').forEach(b=>b.onclick=async()=>{
    const d=await j('/api/credentials/'+encodeURIComponent(b.dataset.name),'GET');
-   if(!d.ok){ alert(d.error); return; }
+   // Judge on the data we actually need rather than trusting an `ok` flag, so a
+   // missing/oddly-shaped response can never surface a bare "undefined".
+   if(!d || !d.name){ alert((d && d.error) || '读取凭据失败'); return; }
+   const t=(d.type && typeFields(d.type).length) ? d.type : 'generic';
    $('original_name').value=d.name; $('f_name').value=d.name; $('f_note').value=d.note||'';
-   sel.value=d.type; renderFields(d.type, d.fields||{});
+   sel.value=t; renderFields(t, d.fields||{});
    $('submitbtn').textContent='保存修改'; $('cancelbtn').style.display='inline-block';
    const bn=$('editbanner'); bn.style.display='block'; bn.textContent='✎ 正在修改：'+d.name;
    document.querySelector('.tab[data-pane="vault"]').click();
@@ -1375,6 +1378,13 @@ def dashboard(request: Request):
 
 @app.get("/api/types")
 def api_types(request: Request):
+    """Credential type catalogue.
+
+    Deliberately NOT wrapped in {"ok": true, ...}: the client consumes the body
+    itself as the type map (`const TYPES = await fetch('/api/types').json()` then
+    `Object.entries(TYPES)`), so adding an `ok` key would render a bogus "ok"
+    entry in the type dropdown.
+    """
     require_user(request)
     return JSONResponse(CRED_TYPES)
 
@@ -1389,9 +1399,13 @@ def api_list(request: Request):
 def api_get(request: Request, name: str):
     user = require_user(request)
     try:
-        return JSONResponse(vault_core.load_record(user, name))
+        rec = vault_core.load_record(user, name)
     except KeyError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=404)
+    # Must carry `ok` like every other endpoint: the editor's click handler opens
+    # with `if(!d.ok)`, and a bare record made it fire the failure branch with an
+    # undefined message — i.e. a stray `undefined` alert on "edit".
+    return JSONResponse({"ok": True, **rec})
 
 
 @app.post("/api/credentials")
