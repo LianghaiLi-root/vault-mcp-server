@@ -37,7 +37,12 @@
 - **自定义边缘校验头** —— 自建 nginx / 其他 CDN 注入的共享密钥（如 `add_header X-Edge-Secret "xxx";`），不匹配即 403。
 - **登录失败限流** —— 同一来源连续失败 N 次后锁定 M 秒（返回 429）。
 
-> `/mcp` 不经过上述边缘校验：它用独立的 Bearer Token 鉴权，面向机器而非浏览器。
+> **边缘校验的豁免规则**：`/mcp` 与**任何携带有效 Bearer Token 的请求**都不经过边缘校验。
+> 前者面向机器、自带鉴权；后者是机器凭据，随手访客伪造不了。
+> 这条豁免也是本功能**不被锁死**的关键 —— 加固开关本身是通过
+> `POST /api/admin/security`（可带 Bearer Token）配置的，若连它也被拦，
+> 一旦开启就只能登服务器改 `config.yaml` 才能恢复。启用开关时界面会二次确认，
+> 提示你需先在 Cloudflare 侧配好 Access 应用。
 
 **MCP 工具：** `vault_save`、`vault_get`、`vault_list`、`vault_delete`，以及
 `vault_http`（AI 盲调 HTTP —— 秘密由服务端注入，永不返回给模型）。
@@ -56,6 +61,20 @@
 | `pyproject.toml` | 包元数据、依赖、控制台入口 |
 | `deploy/` | systemd 单元、nginx TLS 反向代理、`.env` 模板 |
 | `config.example.yaml` | 运维配置模板（用户 + 服务 + 保险库目录） |
+
+> ⚠️ **修改 Web 模板时必读**
+>
+> `vault_mcp/server.py` 里的 `DASH_TPL_SRC` / `LOGIN_TPL_SRC` 是**非 raw** 的三引号
+> 字符串，内部嵌了 JavaScript。在它们里面写 `\n` 会被 Python 编译成**真实换行**，
+> 从而把 JS 字符串字面量劈开，让整段 `<script>` 报
+> `SyntaxError: Invalid or unexpected token` —— 全页事件处理器静默失效
+> （表现为标签页点不动、类型下拉看着是空的）。**注释里的 `\n` 同样会中招。**
+>
+> 写 `\\n`，或用 `['a','b'].join(NL)` 配合 `const NL='\\n';`。
+>
+> 为防复发，服务在 **import 时**会做一次自检：读取 `.py` 源文件，在
+> `<script>…</script>` 区域内扫描该序列，命中即抛错并给出精确行号。
+> 这类错误**无法**靠检查运行时字符串发现（编译后反斜杠已消失），所以自检必须看原始源码。
 
 ## 快速开始（Linux 服务器）
 
