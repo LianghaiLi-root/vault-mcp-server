@@ -1058,6 +1058,85 @@ app.mount("/mcp", mcp_app)
 
 
 # --------------------------------------------------------------------------
+# Global exception handlers — hide the framework fingerprint.
+#
+# FastAPI/Starlette's default 404/405/500 bodies are JSON like
+# {"detail":"Not Found"}, which advertises the exact backend stack. Return a
+# uniform, featureless body instead so an attacker learns nothing from the
+# error shape. The MCP sub-app (mounted at /mcp) handles its own protocol
+# errors internally, so this only shapes the web/API surface.
+# --------------------------------------------------------------------------
+@app.exception_handler(404)
+async def _not_found_handler(request: Request, exc):
+    return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+
+
+@app.exception_handler(405)
+async def _method_not_allowed_handler(request: Request, exc):
+    return JSONResponse({"ok": False, "error": "method not allowed"}, status_code=405)
+
+
+@app.exception_handler(500)
+async def _internal_error_handler(request: Request, exc):
+    # Never leak a traceback or internal detail; log it server-side instead.
+    return JSONResponse({"ok": False, "error": "internal error"}, status_code=500)
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc):
+    # Catch-all: keep the same featureless shape for anything uncaught.
+    if isinstance(exc, HTTPException):
+        detail = exc.detail if isinstance(exc.detail, str) else "error"
+        return JSONResponse({"ok": False, "error": detail},
+                            status_code=exc.status_code)
+    return JSONResponse({"ok": False, "error": "internal error"}, status_code=500)
+
+
+# --------------------------------------------------------------------------
+# MCP handshake rate limiter (unauthenticated only).
+#
+# The MCP /mcp initialize handshake creates a server-side session object, and
+# until now it had no throttle — an attacker could open sessions in a tight
+# loop to exhaust memory. The login endpoint already throttles; this brings
+# the MCP endpoint to parity.
+#
+# IMPORTANT: this service sits behind sing-box REALITY, whose handshake
+# forwards to nginx from 127.0.0.1 — so every request arrives with
+# X-Forwarded-For == 127.0.0.1. An IP-keyed limiter would therefore put every
+# legitimate client into one shared bucket and DoS normal users. Instead we
+# use a GLOBAL token bucket on unauthenticated handshakes only:
+#   * Authenticated requests (valid Bearer token) are NEVER throttled — a
+#     client that already proved its token is a legitimate machine.
+#   * Unauthenticated initialize calls share a global budget; bursts are
+#     absorbed, sustained floods get 429.
+# --------------------------------------------------------------------------
+_MCP_HANDSHAKE_BURST = 30        # allow a burst of N unauthenticated handshakes
+_MCP_HANDSHAKE_RATE = 5.0        # refill N tokens per second thereafter
+_mcp_handshake_tokens = _MCP_HANDSHAKE_BURST
+_mcp_handshake_last = time.monotonic()
+_mcp_handshake_lock = asyncio.Lock()
+
+
+async def _mcp_handshake_allowed() -> bool:
+    """Consume one token from the unauthenticated-handshake bucket."""
+    global _mcp_handshake_tokens, _mcp_handshake_last
+    async with _mcp_handshake_lock:
+        now = time.monotonic()
+        elapsed = now - _mcp_handshake_last
+        _mcp_handshake_tokens = min(
+            _MCP_HANDSHAKE_BURST,
+            _mcp_handshake_tokens + elapsed * _MCP_HANDSHAKE_RATE,
+        )
+        _mcp_handshake_last = now
+        if _mcp_handshake_tokens < 1.0:
+            return False
+        _mcp_handshake_tokens -= 1.0
+        return True
+
+
+
+
+# --------------------------------------------------------------------------
 # Template self-check.
 #
 # These templates are plain (non-raw) Python triple-quoted strings that embed
@@ -1183,6 +1262,25 @@ async def auth_middleware(request: Request, call_next):
         if sid:
             user = auth.verify_session(sid)
     auth_user_ctx.set(user)
+
+    # MCP endpoint hardening (unauthenticated requests only).
+    # The MCP sub-app is mounted at /mcp/; the path rewrite above maps /mcp to
+    # /mcp/. A request that already carries a valid Bearer token has `user`
+    # resolved and skips this guard entirely.
+    if request.scope.get("path") == "/mcp/" and user is None:
+        # A session id on an unauthenticated request means the client is doing
+        # tools/list or tools/call against a handshake it opened without a
+        # token. Refuse it outright so the tool schema (and the "unauthorized"
+        # tool surface) is never enumerable by an anonymous caller.
+        if request.headers.get("mcp-session-id"):
+            return JSONResponse({"ok": False, "error": "unauthorized"},
+                                status_code=401)
+        # Otherwise this is an initialize handshake (no session id yet) — rate
+        # limit it globally to blunt session-exhaustion floods.
+        if not await _mcp_handshake_allowed():
+            return JSONResponse({"ok": False, "error": "too many requests"},
+                                status_code=429)
+
     return await call_next(request)
 
 
