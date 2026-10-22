@@ -41,6 +41,8 @@ from mcp.server.fastmcp import FastMCP
 from . import auth, vault_core
 from . import config
 from . import captcha
+from .credtypes import (CRED_TYPES, TYPE_LABELS, blank, describe_fields,
+                        missing_fields, validate_fields)
 from . import __version__
 
 auth_user_ctx = contextvars.ContextVar("auth_user", default=None)
@@ -48,55 +50,9 @@ auth_user_ctx = contextvars.ContextVar("auth_user", default=None)
 cfg = config.load_config()
 
 
-# --------------------------------------------------------------------------
-# Credential type catalog — drives both the web form and the /api/types schema.
-# Each field: key, label, kind (text|password|textarea), secret (bool), default.
-# Add new common types here; the UI renders them automatically.
-# --------------------------------------------------------------------------
-CRED_TYPES = {
-    "generic": {
-        "label": "通用 / 密码",
-        "fields": [
-            {"key": "value", "label": "秘密 / 密码", "kind": "textarea", "secret": True},
-        ],
-    },
-    "ssh": {
-        "label": "SSH 服务器",
-        "fields": [
-            {"key": "host", "label": "主机 / IP", "kind": "text", "secret": False},
-            {"key": "port", "label": "端口", "kind": "text", "secret": False, "default": "22"},
-            {"key": "username", "label": "用户名", "kind": "text", "secret": False},
-            {"key": "password", "label": "密码", "kind": "password", "secret": True},
-            {"key": "private_key", "label": "私钥", "kind": "textarea", "secret": True},
-        ],
-    },
-    "web": {
-        "label": "网站 / 账号",
-        "fields": [
-            {"key": "url", "label": "网址 URL", "kind": "text", "secret": False},
-            {"key": "username", "label": "用户名 / 邮箱", "kind": "text", "secret": False},
-            {"key": "password", "label": "密码", "kind": "password", "secret": True},
-        ],
-    },
-    "api": {
-        "label": "API / Token",
-        "fields": [
-            {"key": "token", "label": "Token / API Key", "kind": "textarea", "secret": True},
-            {"key": "url", "label": "接口地址 URL", "kind": "text", "secret": False},
-        ],
-    },
-    "db": {
-        "label": "数据库",
-        "fields": [
-            {"key": "host", "label": "主机", "kind": "text", "secret": False},
-            {"key": "port", "label": "端口", "kind": "text", "secret": False},
-            {"key": "database", "label": "数据库名", "kind": "text", "secret": False},
-            {"key": "username", "label": "用户名", "kind": "text", "secret": False},
-            {"key": "password", "label": "密码", "kind": "password", "secret": True},
-        ],
-    },
-}
-TYPE_LABELS = {k: v["label"] for k, v in CRED_TYPES.items()}
+# Credential type catalog and shape rules live in credtypes.py, shared with the
+# stdio front-end — see the import near the top of this module.
+
 
 
 # --------------------------------------------------------------------------
@@ -932,76 +888,7 @@ def _ns() -> str | None:
 # `vault_get(name, field=...)` returns one named field, and `vault_save` rejects
 # shapes the read path could not serve.
 # --------------------------------------------------------------------------
-# Minimum a credential needs to be usable at all — enforced on write.
-REQUIRED_FIELDS = {
-    "generic": ("value",),
-    "ssh": ("host",),
-    "web": ("url",),
-    "api": ("token",),
-    "db": ("host",),
-}
-
-# What "complete" means for a type — reported by vault_list / vault_describe.
-# SSH is special-cased: password OR private_key fills the auth slot.
-COMPLETE_FIELDS = {
-    "generic": ("value",),
-    "ssh": ("host", "port", "username"),
-    "web": ("url", "username", "password"),
-    "api": ("token",),
-    "db": ("host", "port", "database", "username", "password"),
-}
-
-
-def _type_spec(type_: str) -> dict:
-    spec = CRED_TYPES.get(type_)
-    if not spec:
-        raise ValueError(
-            "unknown credential type '%s'; valid types: %s"
-            % (type_, ", ".join(sorted(CRED_TYPES))))
-    return spec
-
-
-def _field_keys(type_: str) -> list:
-    return [f["key"] for f in _type_spec(type_)["fields"]]
-
-
-def _secret_keys(type_: str) -> set:
-    return {f["key"] for f in _type_spec(type_)["fields"] if f.get("secret")}
-
-
-def _blank(v) -> bool:
-    return v is None or (isinstance(v, str) and not v.strip())
-
-
-def _missing_fields(type_: str, fields: dict) -> list:
-    """Keys the type expects for a usable record but which hold no value."""
-    if type_ not in CRED_TYPES:
-        return []          # unknown type: nothing sensible to expect
-    expected = COMPLETE_FIELDS.get(type_) or tuple(_field_keys(type_))
-    missing = [k for k in expected if _blank(fields.get(k))]
-    if type_ == "ssh" and _blank(fields.get("password")) \
-            and _blank(fields.get("private_key")):
-        missing.append("password|private_key")
-    return missing
-
-
-def _describe_fields(type_: str, fields: dict) -> dict:
-    """Per-field report. Secrets are represented by length only, never a value."""
-    known = set(_field_keys(type_)) if type_ in CRED_TYPES else set()
-    secrets = _secret_keys(type_) if type_ in CRED_TYPES else set()
-    out = {}
-    for k, v in fields.items():
-        if _blank(v):
-            out[k] = {"stored": False}
-        elif k in secrets or k not in known:
-            # Unknown/custom keys are treated as secret: we cannot prove they
-            # are safe to echo, and vault_get(name, field=...) can still read them.
-            out[k] = {"stored": True, "secret": True, "length": len(str(v))}
-        else:
-            out[k] = {"stored": True, "secret": False, "value": v}
-    return out
-
-
+# --------------------------------------------------------------------------
 @mcp.tool()
 def vault_save(name: str, value: str = "", note: str = "", type: str = "generic",
               fields: dict = None) -> str:
@@ -1020,21 +907,15 @@ def vault_save(name: str, value: str = "", note: str = "", type: str = "generic"
     if not ns:
         return "ERROR: unauthorized"
     try:
-        _type_spec(type)                       # unknown type -> loud error
         f = dict(fields) if fields else {}
         prim = vault_core.PRIMARY_FIELD.get(type, "value")
-        if not _blank(value) and _blank(f.get(prim)):
+        if not blank(value) and blank(f.get(prim)):
             f[prim] = value
-        unknown = [k for k in f if k not in _field_keys(type)]
-        if unknown:
-            return ("ERROR: unknown field(s) %s for type '%s'. Allowed: %s"
-                    % (unknown, type, _field_keys(type)))
-        missing = [k for k in REQUIRED_FIELDS.get(type, ()) if _blank(f.get(k))]
-        if missing:
-            return ("ERROR: missing required field(s) %s for type '%s' — "
-                    "nothing was saved." % (missing, type))
+        problem = validate_fields(type, f)
+        if problem:
+            return f"ERROR: {problem}"
         r = vault_core.save_credential(ns, name, type, f, note)
-        gaps = _missing_fields(type, f)
+        gaps = missing_fields(type, f)
         tail = "" if not gaps else " Incomplete: missing %s." % gaps
         return f"Saved credential '{r['name']}' (type={r['type']}).{tail}"
     except Exception as e:
@@ -1062,7 +943,7 @@ def vault_get(name: str, field: str | None = None) -> str:
             return ("ERROR: '%s' has no field '%s'. Available fields: %s"
                     % (name, field, ", ".join(fields) or "(none)"))
         val = fields.get(field)
-        if _blank(val):
+        if blank(val):
             return "ERROR: field '%s' of '%s' is empty." % (field, name)
         return str(val)
     except Exception as e:
@@ -1087,14 +968,14 @@ def vault_describe(name: str) -> str:
         return f"ERROR: {e}"
     type_ = rec.get("type", "generic")
     fields = rec["fields"]
-    missing = _missing_fields(type_, fields)
+    missing = missing_fields(type_, fields)
     return json.dumps({
         "name": rec["name"],
         "type": type_,
         "note": rec.get("note", ""),
         "created": rec.get("created", ""),
         "updated": rec.get("updated", ""),
-        "fields": _describe_fields(type_, fields),
+        "fields": describe_fields(type_, fields),
         "missing": missing,
         "complete": not missing,
     }, ensure_ascii=False, indent=2)
@@ -1112,7 +993,7 @@ def vault_list() -> str:
         for item in vault_core.list_credentials(ns):
             try:
                 fields = vault_core.load_record(ns, item["name"])["fields"]
-                missing = _missing_fields(item["type"], fields)
+                missing = missing_fields(item["type"], fields)
             except Exception as e:
                 fields, missing = {}, ["<unreadable: %s>" % e]
             items.append({**item, "fields": list(fields),
