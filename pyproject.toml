@@ -26,6 +26,8 @@ dependencies = [
 # instead of failing open. Turnstile needs no extra package.
 [project.optional-dependencies]
 captcha = ["Pillow>=10"]
+# Test suite: pytest tests/            (live endpoint: pytest -m live)
+dev = ["pytest>=7.4"]
 
 # Console entry points (available after `pip install .`):
 #   vault-mcp-server  -> starts the web + remote MCP server
@@ -36,3 +38,13 @@ vault-mcp-cli = "vault_mcp.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["vault_mcp*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Live tests hit a real endpoint and need MCP_URL + MCP_TOKEN; keep them out of
+# the default run. Enable with: pytest -m live
+addopts = '-m "not live"'
+markers = [
+    "integration: exercises a real subprocess / transport (slower)",
+    "live: talks to a deployed endpoint, needs MCP_URL and MCP_TOKEN",
+]

@@ -313,6 +313,7 @@ Example `mcp.json` snippet for WorkBuddy:
 | `vault_mcp/auth.py` | scrypt password hashing, TOTP (RFC 6238), HMAC session tokens |
 | `vault_mcp/config.py` | Loads/writes `config.yaml`, user CRUD, role checks, web-hardening and CAPTCHA settings, 2FA state persistence |
 | `vault_mcp/captcha.py` | Login human verification: image rendering, single-use answer store, Cloudflare Turnstile verification |
+| `vault_mcp/credtypes.py` | Credential type catalog + shape rules (required fields, completeness, secret masking, write validation), shared by both front-ends |
 | `vault_mcp/server.py` | FastAPI app: web console + remote MCP (`/mcp`) |
 | `vault_mcp/stdio.py` | Local **stdio** MCP server (agent use on this machine) |
 | `vault_mcp/cli.py` | Operator CLI to provision users / tokens |
@@ -320,6 +321,7 @@ Example `mcp.json` snippet for WorkBuddy:
 | `pyproject.toml` | Package metadata, dependencies, console entry points |
 | `deploy/` | systemd unit, nginx TLS proxy, `.env` template |
 | `config.example.yaml` | Operator config template (users + server + vault dir) |
+| `tests/` | Pytest suite (see [Tests](#tests)) |
 
 > ⚠️ **Read this before editing the web templates**
 >
@@ -339,6 +341,38 @@ Example `mcp.json` snippet for WorkBuddy:
 > sequence, raising with an exact line number on a hit. Note this bug **cannot**
 > be detected by inspecting a runtime string — after compilation the backslash is
 > already gone — so the guard must look at the raw source.
+
+---
+
+## Tests
+
+```bash
+pip install -e ".[dev]"
+pytest                       # unit + in-process tool tests + stdio transport
+pytest -m integration        # only the subprocess/transport layer
+pytest -m live               # opt-in: hits a real endpoint (see below)
+```
+
+The suite never reads a real vault. `tests/conftest.py` writes its own
+`config.yaml`, points `VAULT_DIR` at a temporary directory **before any vault
+module is imported**, and re-points it per test case — so running `pytest` on a
+box that hosts a live credential store cannot touch it.
+
+| File | Covers |
+|------|--------|
+| `tests/test_credtypes.py` | Type catalog, required/complete field rules, secret masking, write validation |
+| `tests/test_tools.py` | Both tool layers (`server.py` + `stdio.py`) in-process: field reads, masking, strict saves, namespace checks |
+| `tests/test_stdio_transport.py` | Real `python -m vault_mcp.stdio` subprocess over JSON-RPC |
+| `tests/test_remote_mcp.py` | Live `/mcp` endpoint — **skipped unless `MCP_URL` and `MCP_TOKEN` are set** |
+
+The live tests carry no endpoint, token or credential name: they are read from
+the environment and the probe record gets a random name that is deleted again.
+`pyproject.toml` (`addopts = -m "not live"`) keeps them out of a default run, so
+no deployment detail ever lands in the repository or in a CI log:
+
+```bash
+MCP_URL=https://vault.example.com/mcp MCP_TOKEN=... pytest -m live
+```
 
 ---
 

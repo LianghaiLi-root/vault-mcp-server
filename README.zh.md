@@ -256,6 +256,7 @@ WorkBuddy 的 `mcp.json` 配置示例：
 | `vault_mcp/auth.py` | scrypt 口令哈希、TOTP（RFC 6238）、HMAC 会话令牌 |
 | `vault_mcp/config.py` | 读写 `config.yaml`、用户增删改查、角色判定、Web 加固与人机验证设置、双因素状态持久化 |
 | `vault_mcp/captcha.py` | 登录人机验证：图片渲染、一次性答案存储、Cloudflare Turnstile 校验 |
+| `vault_mcp/credtypes.py` | 凭据类型目录与形状规则（必填字段、完整性、秘密掩码、写入校验），两个前端共用 |
 | `vault_mcp/server.py` | FastAPI 应用：Web 控制台 + 远程 MCP（`/mcp`） |
 | `vault_mcp/stdio.py` | 本地 **stdio** MCP 服务（供本机智能体使用） |
 | `vault_mcp/cli.py` | 运维命令行，用于预置用户与令牌 |
@@ -263,6 +264,7 @@ WorkBuddy 的 `mcp.json` 配置示例：
 | `pyproject.toml` | 包元数据、依赖、命令行入口 |
 | `deploy/` | systemd 单元、nginx TLS 反向代理、`.env` 模板 |
 | `config.example.yaml` | 运维配置模板（用户 + 服务 + 保险库目录） |
+| `tests/` | Pytest 测试套件（见[测试](#测试)） |
 
 > ⚠️ **修改 Web 模板前必读**
 >
@@ -278,6 +280,36 @@ WorkBuddy 的 `mcp.json` 配置示例：
 > 在 `<script>……</script>` 区域内扫描该序列，命中即抛错并给出精确行号。
 > 注意这个错误**无法**通过检查运行时字符串发现（编译后反斜杠已消失），
 > 因此自检必须查看原始源码。
+
+---
+
+## 测试
+
+```bash
+pip install -e ".[dev]"
+pytest                       # 单元 + 进程内工具测试 + stdio 传输层
+pytest -m integration        # 只跑子进程/传输层
+pytest -m live               # 需显式开启：打真实端点（见下）
+```
+
+测试**绝不会读写真实保险库**。`tests/conftest.py` 自己写一份 `config.yaml`，并在
+**任何 vault 模块被导入之前**把 `VAULT_DIR` 指向临时目录，且每个用例再单独指向
+自己的子目录——因此即便在生产机上直接跑 `pytest`，也不会碰到线上凭据。
+
+| 文件 | 覆盖范围 |
+|------|----------|
+| `tests/test_credtypes.py` | 类型目录、必填/完整性规则、秘密掩码、写入校验 |
+| `tests/test_tools.py` | 两个工具层（`server.py` + `stdio.py`）进程内测试：字段读取、掩码、严格写入、命名空间检查 |
+| `tests/test_stdio_transport.py` | 真实 `python -m vault_mcp.stdio` 子进程 + JSON-RPC |
+| `tests/test_remote_mcp.py` | 真实 `/mcp` 端点——**未设置 `MCP_URL` 与 `MCP_TOKEN` 时自动跳过** |
+
+live 用例里没有任何端点、令牌或凭据名：全部从环境变量读取，探测记录用随机名并在
+结束时删除。`pyproject.toml` 的 `addopts = -m "not live"` 让默认运行不触碰它们，
+因此部署细节既不会进仓库，也不会进 CI 日志：
+
+```bash
+MCP_URL=https://vault.example.com/mcp MCP_TOKEN=... pytest -m live
+```
 
 ---
 
