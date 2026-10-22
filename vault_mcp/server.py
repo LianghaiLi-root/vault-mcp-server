@@ -921,46 +921,203 @@ def _ns() -> str | None:
     return auth_user_ctx.get()
 
 
+# --------------------------------------------------------------------------
+# Field-aware read path for the MCP tools.
+#
+# The store has always kept every field (host/port/username/...) inside the
+# encrypted blob, and the web console has always been able to read them back —
+# but the MCP tools only ever exposed the *primary* secret. A remote AI client
+# could therefore fetch an SSH password yet had no way to learn the host or port
+# it belongs to. `vault_describe` advertises the shape of a record,
+# `vault_get(name, field=...)` returns one named field, and `vault_save` rejects
+# shapes the read path could not serve.
+# --------------------------------------------------------------------------
+# Minimum a credential needs to be usable at all — enforced on write.
+REQUIRED_FIELDS = {
+    "generic": ("value",),
+    "ssh": ("host",),
+    "web": ("url",),
+    "api": ("token",),
+    "db": ("host",),
+}
+
+# What "complete" means for a type — reported by vault_list / vault_describe.
+# SSH is special-cased: password OR private_key fills the auth slot.
+COMPLETE_FIELDS = {
+    "generic": ("value",),
+    "ssh": ("host", "port", "username"),
+    "web": ("url", "username", "password"),
+    "api": ("token",),
+    "db": ("host", "port", "database", "username", "password"),
+}
+
+
+def _type_spec(type_: str) -> dict:
+    spec = CRED_TYPES.get(type_)
+    if not spec:
+        raise ValueError(
+            "unknown credential type '%s'; valid types: %s"
+            % (type_, ", ".join(sorted(CRED_TYPES))))
+    return spec
+
+
+def _field_keys(type_: str) -> list:
+    return [f["key"] for f in _type_spec(type_)["fields"]]
+
+
+def _secret_keys(type_: str) -> set:
+    return {f["key"] for f in _type_spec(type_)["fields"] if f.get("secret")}
+
+
+def _blank(v) -> bool:
+    return v is None or (isinstance(v, str) and not v.strip())
+
+
+def _missing_fields(type_: str, fields: dict) -> list:
+    """Keys the type expects for a usable record but which hold no value."""
+    if type_ not in CRED_TYPES:
+        return []          # unknown type: nothing sensible to expect
+    expected = COMPLETE_FIELDS.get(type_) or tuple(_field_keys(type_))
+    missing = [k for k in expected if _blank(fields.get(k))]
+    if type_ == "ssh" and _blank(fields.get("password")) \
+            and _blank(fields.get("private_key")):
+        missing.append("password|private_key")
+    return missing
+
+
+def _describe_fields(type_: str, fields: dict) -> dict:
+    """Per-field report. Secrets are represented by length only, never a value."""
+    known = set(_field_keys(type_)) if type_ in CRED_TYPES else set()
+    secrets = _secret_keys(type_) if type_ in CRED_TYPES else set()
+    out = {}
+    for k, v in fields.items():
+        if _blank(v):
+            out[k] = {"stored": False}
+        elif k in secrets or k not in known:
+            # Unknown/custom keys are treated as secret: we cannot prove they
+            # are safe to echo, and vault_get(name, field=...) can still read them.
+            out[k] = {"stored": True, "secret": True, "length": len(str(v))}
+        else:
+            out[k] = {"stored": True, "secret": False, "value": v}
+    return out
+
+
 @mcp.tool()
-def vault_save(name: str, value: str, note: str = "", type: str = "generic",
+def vault_save(name: str, value: str = "", note: str = "", type: str = "generic",
               fields: dict = None) -> str:
     """Save or update a credential in the caller's encrypted vault namespace.
 
-    `value` is the primary secret for a generic credential. For typed credentials
-    (ssh/web/api/db) pass `type` and a `fields` dict instead; `value` then
-    becomes the primary secret within `fields` automatically.
+    `fields` is the structured form — pass every field the type defines, e.g.
+    `{"host": "10.0.0.1", "port": "22", "username": "root", "password": "..."}`.
+    `value` is the primary secret (password / token / value); it may be left
+    empty when `fields` already carries that field.
+
+    Writes fail loudly rather than storing a record the read path cannot serve:
+    an unknown type, an unknown field name, or a missing required field returns
+    `ERROR: ...` and saves nothing.
     """
     ns = _ns()
     if not ns:
         return "ERROR: unauthorized"
     try:
-        f = dict(fields) if fields else {"value": value}
+        _type_spec(type)                       # unknown type -> loud error
+        f = dict(fields) if fields else {}
+        prim = vault_core.PRIMARY_FIELD.get(type, "value")
+        if not _blank(value) and _blank(f.get(prim)):
+            f[prim] = value
+        unknown = [k for k in f if k not in _field_keys(type)]
+        if unknown:
+            return ("ERROR: unknown field(s) %s for type '%s'. Allowed: %s"
+                    % (unknown, type, _field_keys(type)))
+        missing = [k for k in REQUIRED_FIELDS.get(type, ()) if _blank(f.get(k))]
+        if missing:
+            return ("ERROR: missing required field(s) %s for type '%s' — "
+                    "nothing was saved." % (missing, type))
         r = vault_core.save_credential(ns, name, type, f, note)
-        return f"Saved credential '{r['name']}' (type={r['type']})."
+        gaps = _missing_fields(type, f)
+        tail = "" if not gaps else " Incomplete: missing %s." % gaps
+        return f"Saved credential '{r['name']}' (type={r['type']}).{tail}"
     except Exception as e:
         return f"ERROR: {e}"
 
 
 @mcp.tool()
-def vault_get(name: str) -> str:
-    """Retrieve a stored credential value by name (plaintext, for immediate use)."""
+def vault_get(name: str, field: str | None = None) -> str:
+    """Retrieve a credential's primary secret, or one named field of it.
+
+    * Without `field`: the primary secret for the type (password / token /
+      value) — unchanged behaviour.
+    * With `field`: that field verbatim, e.g. `host`, `port`, `username`.
+      Call `vault_describe` first to see which fields a record holds.
+    """
     ns = _ns()
     if not ns:
         return "ERROR: unauthorized"
     try:
-        return vault_core.get_credential(ns, name)
+        if field is None:
+            return vault_core.get_credential(ns, name)
+        rec = vault_core.load_record(ns, name)
+        fields = rec["fields"]
+        if field not in fields:
+            return ("ERROR: '%s' has no field '%s'. Available fields: %s"
+                    % (name, field, ", ".join(fields) or "(none)"))
+        val = fields.get(field)
+        if _blank(val):
+            return "ERROR: field '%s' of '%s' is empty." % (field, name)
+        return str(val)
     except Exception as e:
         return f"ERROR: {e}"
+
+
+@mcp.tool()
+def vault_describe(name: str) -> str:
+    """Describe a credential's shape without disclosing its secrets.
+
+    Returns JSON with the record's `type`, `note`, timestamps, a per-field map
+    (`stored`; `value` for non-secret fields; `secret` + `length` otherwise),
+    `missing` — keys the type expects but the record lacks — and `complete`.
+    Read a specific field with `vault_get(name, field=...)`.
+    """
+    ns = _ns()
+    if not ns:
+        return "ERROR: unauthorized"
+    try:
+        rec = vault_core.load_record(ns, name)
+    except Exception as e:
+        return f"ERROR: {e}"
+    type_ = rec.get("type", "generic")
+    fields = rec["fields"]
+    missing = _missing_fields(type_, fields)
+    return json.dumps({
+        "name": rec["name"],
+        "type": type_,
+        "note": rec.get("note", ""),
+        "created": rec.get("created", ""),
+        "updated": rec.get("updated", ""),
+        "fields": _describe_fields(type_, fields),
+        "missing": missing,
+        "complete": not missing,
+    }, ensure_ascii=False, indent=2)
 
 
 @mcp.tool()
 def vault_list() -> str:
-    """List the caller's credential names/notes/timestamps (never the values)."""
+    """List the caller's credentials: names/notes/timestamps plus the field keys
+    each record holds and whether it is complete. Never returns a secret."""
     ns = _ns()
     if not ns:
         return "ERROR: unauthorized"
     try:
-        return json.dumps(vault_core.list_credentials(ns), ensure_ascii=False, indent=2)
+        items = []
+        for item in vault_core.list_credentials(ns):
+            try:
+                fields = vault_core.load_record(ns, item["name"])["fields"]
+                missing = _missing_fields(item["type"], fields)
+            except Exception as e:
+                fields, missing = {}, ["<unreadable: %s>" % e]
+            items.append({**item, "fields": list(fields),
+                          "complete": not missing, "missing": missing})
+        return json.dumps(items, ensure_ascii=False, indent=2)
     except Exception as e:
         return f"ERROR: {e}"
 

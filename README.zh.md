@@ -176,8 +176,21 @@ docker compose up --build
 
 ### MCP 工具
 
-`vault_save`、`vault_get`、`vault_list`、`vault_delete`，以及 `vault_http`
-（AI 盲调 HTTP —— 秘密由服务端注入，永不返回给模型）。
+`vault_save`、`vault_get`、`vault_describe`、`vault_list`、`vault_delete`，以及
+`vault_http`（AI 盲调 HTTP —— 秘密由服务端注入，永不返回给模型）。
+
+读取是**字段级**的，客户端因此可以连同密码一起取到主机与端口，而不是只拿到密码：
+
+* `vault_describe(name)` —— 返回记录结构：每个已存字段的键名、非秘密字段
+  （`host`、`port`、`username`、`url` 等）的值、秘密字段只给长度，并附
+  `missing` 与 `complete`，让人在依赖它之前就能看出记录是否残缺。
+* `vault_get(name, field="host")` —— 按名取单个字段。只传 `name` 时行为不变，
+  仍返回主秘密，老客户端不受影响。
+* `vault_list()` —— 在原有字段之外，补充每条记录的字段键与 `complete` 标记。
+
+`vault_save` 会严格校验结构：类型未知、字段名未知、或缺少必填字段
+（`ssh` 的 `host`、`web` 的 `url`、`api` 的 `token`）都直接报错且不写入，
+因此记录不会落成读取路径服务不了的状态。
 
 ---
 
@@ -200,7 +213,7 @@ docker compose up --build
 
 ## 远程 MCP 客户端
 
-将 MCP 客户端指向 `http://<主机>:8080/mcp`，并以用户的 `mcp_token` 作为 **Bearer** 令牌鉴权。四个工具 —— `vault_save`、`vault_get`、`vault_list`、`vault_delete` —— 只作用于该用户自己的命名空间。此外还有一个**AI 盲调**工具：
+将 MCP 客户端指向 `http://<主机>:8080/mcp`，并以用户的 `mcp_token` 作为 **Bearer** 令牌鉴权。五个工具 —— `vault_save`、`vault_get`、`vault_describe`、`vault_list`、`vault_delete` —— 只作用于该用户自己的命名空间。此外还有一个**AI 盲调**工具：
 
 * **`vault_http(name, url, method, headers, body, secret_header)`** —— 服务端取出凭据后注入请求（在请求头或请求体中使用 `{{secret}}` 占位符，或指定 `secret_header`），代发请求并只返回 HTTP 响应内容。秘密**永远不会**返回给模型，并且会从响应中被抹除。仅允许 `https`；可选配置 `http.allow_hosts` 限制目标主机。当 AI 只需要"调用"某个 API 而不需要看到秘密时，应使用此工具而非 `vault_get`。
 

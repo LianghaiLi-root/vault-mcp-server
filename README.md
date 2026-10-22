@@ -210,9 +210,26 @@ comparison. Pick one mode:
 
 ### MCP tools
 
-`vault_save`, `vault_get`, `vault_list`, `vault_delete`, and `vault_http`
-(an AI-blind HTTP call — the secret is injected server-side and never returned
-to the model).
+`vault_save`, `vault_get`, `vault_describe`, `vault_list`, `vault_delete`, and
+`vault_http` (an AI-blind HTTP call — the secret is injected server-side and
+never returned to the model).
+
+Reads are **field-aware**, so a client can fetch the host and port along with the
+password instead of only the password:
+
+* `vault_describe(name)` — the shape of a record: every stored field key, the
+  value of non-secret fields (`host`, `port`, `username`, `url`, ...), a `length`
+  for secrets, plus `missing` and `complete` so an incomplete entry is visible
+  before you rely on it.
+* `vault_get(name, field="host")` — one named field, verbatim. `vault_get(name)`
+  on its own still returns just the primary secret, so existing clients are
+  unaffected.
+* `vault_list()` — adds each record's field keys and its `complete` flag.
+
+`vault_save` is strict about shape: an unknown type, an unknown field name, or a
+missing required field (`host` for `ssh`, `url` for `web`, `token` for `api`)
+returns an error and stores nothing, so a record can never land in a state the
+read path cannot serve.
 
 ---
 
@@ -241,9 +258,9 @@ blob — only `name`, `type` and `note` live in plaintext metadata, so the list
 ## Remote MCP client
 
 Point your MCP client at `http://<host>:8080/mcp` and authenticate with the
-user's `mcp_token` as a **Bearer** token. The four tools — `vault_save`,
-`vault_get`, `vault_list`, `vault_delete` — operate only on that user's
-namespace. There is also an **AI-blind** tool:
+user's `mcp_token` as a **Bearer** token. The five tools — `vault_save`,
+`vault_get`, `vault_describe`, `vault_list`, `vault_delete` — operate only on
+that user's namespace. There is also an **AI-blind** tool:
 
 * **`vault_http(name, url, method, headers, body, secret_header)`** — the server
   fetches `url` with the stored secret injected server-side (placeholder
